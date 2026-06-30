@@ -1,3 +1,16 @@
+# Data files
+/*.rds
+
+# Results
+/rds
+/figures
+/tables
+/misc
+*.html
+*.docx
+*.png
+
+
 # History files
 .Rhistory
 .Rapp.history
@@ -47,3 +60,8 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Other
+*Thumbs.db
+*.csv
+*.xlsx
