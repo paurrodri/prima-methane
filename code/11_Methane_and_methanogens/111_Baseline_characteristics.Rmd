@@ -1,0 +1,164 @@
+---
+title: "Baseline characteristics: HMP vs LMP"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "111"
+  methane_group: "Methane_group"
+  
+  continuous_test_means: "wilcox.test" 
+  categorical_test_means: "fisher.test"
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tidyverse)
+library(glue)
+library(gt)
+library(gtsummary)
+library(magrittr)
+library(openxlsx)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+lm_pval_fun <- function(data, variable, by, full_data = data, ...) {
+  
+  clean_data <- full_data %>%
+      dplyr::select(all_of(c(variable, by, "Subject_ID"))) %>%
+      tidyr::drop_na()
+  
+  
+    f <- as.formula(paste0("`", variable, "` ~ `", by, "` + (1|Subject_ID)"))
+    model <- lm(f, data = clean_data)
+    pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+  
+  tibble::tibble(p.value = pval)
+}
+```
+
+
+
+# Read data
+## Meta
+```{r}
+meta_means_raw <- readRDS(meta_means_filename)
+```
+
+
+# Prepare data
+
+## Select variables of interest
+```{r}
+bsl_vars <- c("sex", "age", "bmi",
+              "glucose", "insulin", "c_peptide",
+              "fasting_H2", "fasting_CH4"
+              )
+
+bsl_varnames <- list("Sex (male/female)",
+                     "Age (years)",
+                     "Body mass index (kg/m2)",
+                     "Fasting glucose (mmol/L)",
+                     "Fasting insulin (mmol/L)",
+                     "Fasting C-peptide (mmol/L)",
+                     "Fasting hydrogen (ppm)",
+                     "Fasting methane (ppm)"
+)
+
+bsl_var_mapping <- bsl_varnames
+names(bsl_var_mapping) <- bsl_vars
+
+
+
+meta_means <- meta_means_raw %>% 
+  select(Subject_ID, !!sym(params$methane_group), all_of(bsl_vars))
+
+```
+
+
+# Baseline table (means)
+```{r}
+bsl_table_means <- 
+  meta_means %>%
+  select(!!sym(params$methane_group), all_of(bsl_vars)) %>% 
+  rename(!!!setNames(bsl_vars, bsl_varnames)) %>% 
+  tbl_summary(
+    by = !!sym(params$methane_group),
+    missing = "no",
+    statistic = list(
+    all_continuous() ~ "{mean} ({sd})"
+  ),
+  digits = list("Age (years)" ~ 0,
+                all_continuous() ~ 1)
+  ) %>%
+  add_overall() %>% 
+  add_p(test = list(
+    all_continuous() ~ params$continuous_test_means,
+    all_categorical() ~ params$categorical_test_means
+    )
+  )
+
+bsl_table_means
+```
+
+
+
+# Save results
+
+## Baseline table (means) as a plot
+```{r}
+format <- "pdf" # "png" "pdf"
+bsl_table_means_gt <- as_gt(bsl_table_means)
+
+gtsave(
+  data = bsl_table_means_gt,
+  filename = glue("{fig_dir}/{params$markdown_id}_baseline_table_means.{format}")
+)
+```
+
+## Baseline table (means) as an excel
+```{r}
+bsl_table_means_xlsx <- as_tibble(bsl_table_means, col_labels = TRUE)
+
+write.xlsx(bsl_table_means_xlsx,
+           glue("{tab_dir}/{params$markdown_id}_baseline_table_means.xlsx"))
+```
+
+## Baseline table (means) as rds
+```{r}
+bsl_table_means %>% saveRDS(glue("{rds_dir}/{params$markdown_id}_baseline_table_means.rds"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

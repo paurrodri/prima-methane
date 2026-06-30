@@ -1,0 +1,1379 @@
+---
+title: "Methane, methane groups, and methanogens"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "110" # "110_MTT2" means methane TT 2group
+  methane_group: "Methane_group" # "Methane_TT_2group"
+  cor_method: "spearman"
+---
+
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(grid)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+count_how_many_zero_per_column <- function (data){
+    sapply(data, function(x) sum(x == 0, na.rm = T))
+}
+```
+
+
+# Read data
+## Meta
+```{r}
+meta_means_raw <- readRDS(meta_means_filename)
+meta_all_raw   <- readRDS(meta_all_filename)
+```
+
+
+# Prepare data
+```{r}
+meta <- meta_means_raw %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+# extract longitudinal breath, archaea, and smithii data
+breath_data_all <- meta_all_raw %>% 
+  filter(!is.na(!!sym(params$methane_group))) %>% 
+  select(Subject_ID, fasting_CH4, Day) %>% 
+  filter(!is.na(fasting_CH4)) %>% 
+  pivot_wider(id_cols = "Subject_ID",
+              names_from = "Day",
+              values_from = fasting_CH4,
+              names_prefix = "Day_") %>% 
+  left_join(meta %>% select(Subject_ID, !!sym(params$methane_group)),
+            by = "Subject_ID")
+
+archaea_data_all <- meta_all_raw %>% 
+  filter(!is.na(!!sym(params$methane_group))) %>% 
+  select(Subject_ID, archaea_inv_ct, Day) %>% 
+  arrange(Subject_ID, Day) %>% 
+  filter(!is.na(archaea_inv_ct)) %>% 
+  group_by(Subject_ID) %>%
+  arrange(Day, .by_group = TRUE) %>%
+  mutate(measurement = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = "Subject_ID",
+              names_from = "measurement",
+              values_from = archaea_inv_ct,
+              names_prefix = "Measurement_") %>% 
+  left_join(meta %>% select(Subject_ID, !!sym(params$methane_group)),
+            by = "Subject_ID")
+
+smithii_data_all <- meta_all_raw %>% 
+  filter(!is.na(!!sym(params$methane_group))) %>% 
+  select(Subject_ID, smithii_inv_ct, Day) %>% 
+  arrange(Subject_ID, Day) %>% 
+  filter(!is.na(smithii_inv_ct)) %>% 
+  group_by(Subject_ID) %>%
+  arrange(Day, .by_group = TRUE) %>%
+  mutate(measurement = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = "Subject_ID",
+              names_from = "measurement",
+              values_from = smithii_inv_ct,
+              names_prefix = "Measurement_") %>% 
+  left_join(meta %>% select(Subject_ID, !!sym(params$methane_group)),
+            by = "Subject_ID")
+```
+
+# Analyse data
+## Chisq detected smithii
+```{r}
+cont_table_smi <- meta %>% 
+  mutate(is_smithii_detected = ifelse(is.na(smithii_inv_ct), "No", "Yes")) %>% 
+  select(params$methane_group, is_smithii_detected) %>% 
+  table()
+
+test_smi <- chisq.test(cont_table_smi)
+
+p_label_smi <- ifelse(test_smi$p.value < 0.001, "p < 0.001", glue("p = {test_smi$p.value}"))
+
+
+cont_df_smi  <- cont_table_smi %>% as_tibble()
+
+# used for the plot later
+cont_plot_smi <- tableGrob(
+  tibble(
+    !!p_label_smi := c("Detected", "Not detected"),
+    "HMP" = c(cont_df_smi %>% filter(!!sym(params$methane_group) == "HMP", is_smithii_detected == "Yes" ) %>% pull(n),
+              cont_df_smi %>% filter(!!sym(params$methane_group) == "HMP", is_smithii_detected == "No" ) %>% pull(n)),
+    "LMP" = c(cont_df_smi %>% filter(!!sym(params$methane_group) == "LMP", is_smithii_detected == "Yes" ) %>% pull(n),
+          cont_df_smi %>% filter(!!sym(params$methane_group) == "LMP", is_smithii_detected == "No" ) %>% pull(n))
+  ), 
+  rows = NULL,
+    theme = ttheme_default(
+    core = list(fg_params = list(cex = 1.1),  # text size inside table
+                bg_params = list(fill = "white", col = "black")),  # white background, black border
+    colhead = list(fg_params = list(cex = 1.1),  # header text size
+                   bg_params = list(fill = "white", col = "black"))
+  )
+)
+
+
+```
+
+
+
+
+# Figures
+
+## Aesthetics
+```{r}
+fontsize <- 14
+methane_uni_color <- "#9EAFBA"
+```
+
+## 1) CH4 day 2 and CH4 day 9
+```{r}
+x <- "Day_2"
+y <- "Day_9"
+
+xlim <- c(0, paulaR::ceiling_signif(max(breath_data_all[[x]], breath_data_all[[y]], na.rm = T), 1))
+ylim <- xlim
+
+test <- breath_data_all %>%
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(breath_data_all[[y]], na.rm = TRUE) * 1.15,
+    x_pos = min(breath_data_all[[x]], na.rm = TRUE) * 1.05
+   )
+
+ch4_day2_day9_correlation <-
+  breath_data_all %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(
+              fill = methane_uni_color, 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(0, xlim[2], 20)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(0, ylim[2], 20)
+                       ) +
+    labs(title = "",
+         y = "Fasting breath methane, day 9 (ppm)",
+         x = "Fasting breath methane, day 2 (ppm)",
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+ch4_day2_day9_correlation
+```
+
+## 2) Breath methane and groups
+```{r}
+x <- params$methane_group
+y <- "fasting_CH4"
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1))
+
+model_data <- meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     na.omit()
+
+subject_counts <- model_data %>% 
+  group_by(group = !!sym(x)) %>% 
+  count()
+
+labels <- setNames(
+  paste0(subject_counts$group, "\n(N=", subject_counts$n, ")"),
+  subject_counts$group
+)
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      model_data,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    y.position = max(model_data[[y]], na.rm = TRUE) * 1.05
+    )
+
+ch4_groups_boxplot <- model_data %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black",
+                  show.legend = FALSE) +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 stroke = 1.2,
+                 height = 0,
+                 alpha = 0.6,
+                 show.legend = TRUE) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  scale_x_discrete(labels = labels) +
+     labs(title = "",
+          y = "Fasting breath methane (ppm)",
+          x = "",
+          ) +
+    coord_cartesian(ylim = ylim) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none")
+
+ch4_groups_boxplot
+```
+
+## 3) Breath methane and Archaea
+```{r}
+y <- "archaea_inv_ct"
+x <- "fasting_CH4"
+
+
+ylim <- c(paulaR::trunc_signif(min(meta[[y]], na.rm = T), -2)+0.005,
+          paulaR::ceiling_signif(max(meta[[y]], na.rm = T), -2))
+
+
+xlim <- c(0, paulaR::ceiling_signif(max(meta[[x]], na.rm = T), 1)+10)
+
+test <- meta %>%
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = min(meta[[y]], na.rm = TRUE) ,
+    x_pos = min(meta[[x]], na.rm = TRUE) + 10
+   )
+
+arc_ch4_correlation <-
+  meta %>% 
+  select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(
+      fill = methane_uni_color,
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1], xlim[2], 20)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(ylim[1]+0.005, ylim[2], 0.01)
+                       ) +
+    labs(title = "",
+         x = "Fasting breath methane (ppm)",
+         y = "Archaea qPCR signal (1/Ct)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+arc_ch4_correlation
+```
+
+## 4) Archaea and groups
+```{r}
+x <- params$methane_group
+y <- "archaea_inv_ct"
+
+
+ylim <- c(0, 
+          paulaR::ceiling_signif(max(meta[[y]], na.rm = T), -2)+0.005)
+
+model_data <- meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     na.omit()
+
+subject_counts <- model_data %>% 
+  group_by(group = !!sym(x)) %>% 
+  count()
+
+labels <- setNames(
+  paste0(subject_counts$group, "\n(N=", subject_counts$n, ")"),
+  subject_counts$group
+)
+
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      model_data,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    y.position = max(model_data[[y]], na.rm = TRUE) * 1.05
+    )
+
+arc_groups_boxplot <- 
+  model_data %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black",
+                  show.legend = FALSE) +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6,
+                  show.legend = TRUE) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  scale_x_discrete(labels = labels) +
+     labs(title = "",
+          y = "Archaea qPCR signal (1/Ct)",
+          x = "",
+          ) +
+    coord_cartesian(ylim = ylim, 
+                    ) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none")
+
+arc_groups_boxplot
+```
+
+## 5) Breath methane and M. smithii
+```{r}
+y <- "smithii_inv_ct"
+x <- "fasting_CH4"
+
+ylim <- c(paulaR::trunc_signif(min(meta[[y]], na.rm = T), -2)-0.005, 
+          paulaR::ceiling_signif(max(meta[[y]], na.rm = T), -2)+0.01)
+
+xlim <- c(0, paulaR::ceiling_signif(max(meta[[x]], na.rm = T), 1)+10)
+
+
+test <- meta %>%
+  select(!!sym(x), !!sym(y)) %>% 
+  na.omit() %>% 
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = min(meta[[y]], na.rm = TRUE) ,
+    x_pos = min(meta[[x]], na.rm = TRUE) + 10
+   )
+
+smi_ch4_correlation <-
+  meta %>%
+  select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(fill = methane_uni_color,
+                shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1], xlim[2], 20)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                  breaks = seq(ylim[1]+0.005, ylim[2], 0.01)
+                   ) +
+    labs(title = "",
+         x = "Fasting breath methane (ppm)",
+         y = "M. smithii qPCR signal (1/Ct)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+smi_ch4_correlation
+```
+
+## 6) M. smithii and groups
+```{r}
+x <- params$methane_group
+y <- "smithii_inv_ct"
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), -2)+0.015)
+
+model_data <- meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     na.omit()
+
+subject_counts <- model_data %>% 
+  group_by(group = !!sym(x)) %>% 
+  count()
+
+labels <- setNames(
+  paste0(subject_counts$group, "\n(N=", subject_counts$n, ")"),
+  subject_counts$group
+)
+
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      model_data,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    y.position = max(model_data[[y]], na.rm = TRUE) * 1.05
+    )
+
+smi_groups_boxplot <- 
+  model_data %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  scale_x_discrete(labels = labels) +
+     labs(title = "",
+          y = "M. smithii qPCR signal (1/Ct)",
+          x = "",
+          ) +
+    coord_cartesian(ylim = ylim) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none")  +
+    annotation_custom(
+      grob = cont_plot_smi,
+      xmin = 1, xmax = 2, 
+      ymin = 0.001, ymax = 0.025
+    )
+
+smi_groups_boxplot
+```
+
+
+## 7) Breath methane and hydrogen
+```{r}
+x <- "fasting_H2"
+y <- "fasting_CH4"
+
+xlim <- c(paulaR::trunc_signif(min(meta[[x]], na.rm = F), 0),
+          paulaR::ceiling_signif(max(meta[[x]], na.rm = T), 1))
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1)+10)
+
+test <- meta %>%
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(meta[[y]], na.rm = TRUE) * 1.15,
+    x_pos = min(meta[[x]], na.rm = TRUE) * 1.05
+   )
+
+h2_ch4_correlation <-
+  meta %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1], xlim[2], 20)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(0, ylim[2], 20)
+                       ) +
+    labs(title = "",
+         y = "Fasting breath methane (ppm)",
+         x = "Fasting breath hydrogen (ppm)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom") 
+
+h2_ch4_correlation
+```
+
+## 8) M. smithii and Archaea
+```{r}
+x <- "archaea_inv_ct"
+y <- "smithii_inv_ct"
+
+
+xlim <- c(paulaR::trunc_signif(min(meta[[x]], na.rm = T), -2)+0.005,
+          paulaR::ceiling_signif(max(meta[[x]], na.rm = T), -2))
+ylim <- c(paulaR::trunc_signif(min(meta[[y]], na.rm = T), -2)-0.005,
+          paulaR::ceiling_signif(max(meta[[y]], na.rm = T), -2)+0.01)
+
+test <- meta %>%
+    select(!!sym(x), !!sym(y)) %>% 
+  na.omit() %>% 
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(meta[[y]], na.rm = TRUE),
+    x_pos = min(meta[[x]], na.rm = TRUE) * 1.05
+   )
+
+arc_smi_correlation <-
+  meta %>% 
+  select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1]+0.005, xlim[2], 0.01)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(ylim[1]+0.005, ylim[2], 0.01)
+                       ) +
+    labs(title = "",
+         y = "Detected M. smithii qPCR signal (1/Ct)",
+         x = "Archaea qPCR signal (1/Ct)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+arc_smi_correlation
+```
+
+## 9) Archaea measurements 1 and 2
+```{r}
+x <- "Measurement_1"
+y <- "Measurement_2"
+
+
+xlim <- c(paulaR::trunc_signif(min(archaea_data_all[[x]], 
+                                     archaea_data_all[[y]],
+                                     na.rm = T), -2)+0.005,
+          paulaR::ceiling_signif(max(archaea_data_all[[x]], 
+                                     archaea_data_all[[y]],
+                                     na.rm = T), -2)
+          )
+
+ylim <- xlim
+
+test <- archaea_data_all %>%
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(ylim[2], na.rm = TRUE) * 0.95,
+    x_pos = min(xlim[1], na.rm = TRUE) * 1.05
+   )
+
+arc_m1_m2_correlation <-
+  archaea_data_all %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(
+      aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1]+0.005, xlim[2], 0.01)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(ylim[1]+0.005, ylim[2], 0.01)
+                       ) +
+    labs(title = "",
+         y = "Archaea, measurement 2 qPCR signal (1/Ct)",
+         x = "Archaea, measurement 1 qPCR signal (1/Ct)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+arc_m1_m2_correlation
+```
+
+## 10) M. smithii measurements 1 and 2
+```{r}
+x <- "Measurement_1"
+y <- "Measurement_2"
+
+xlim <- c(paulaR::trunc_signif(min(smithii_data_all[[x]], 
+                                     smithii_data_all[[y]],
+                                     na.rm = T), -2)+0.005,
+          paulaR::ceiling_signif(max(smithii_data_all[[x]], 
+                                     smithii_data_all[[y]],
+                                     na.rm = T), -2)
+          )
+ylim <- xlim
+
+test <- smithii_data_all %>%
+  select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(ylim[2], na.rm = TRUE) * 0.98,
+    x_pos = min(xlim[1], na.rm = TRUE) * 1.05
+   )
+
+smi_m1_m2_correlation <-
+  smithii_data_all %>% 
+    select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(
+      aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1]+0.005, xlim[2], 0.01)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(ylim[1]+0.005, ylim[2], 0.01)
+                       ) +
+    labs(title = "",
+         y = "Detected M. smithii, measurement 2 qPCR signal (1/Ct)",
+         x = "Detected M. smithii, measurement 1 qPCR signal (1/Ct)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+smi_m1_m2_correlation
+```
+
+## 11) Breath methane and WGTTT
+```{r}
+# this plot is included in supplementary when params$methane_group = "Methane_TT_2group"
+x <- "WGTT"
+y <- "fasting_CH4"
+
+xlim <- c(paulaR::trunc_signif(min(meta[[x]], na.rm = T), 0),
+          paulaR::ceiling_signif(max(meta[[x]], na.rm = T), 0))
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1)+10)
+
+test <- meta %>%
+  select(!!sym(x), !!sym(y)) %>% 
+  na.omit() %>% 
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(meta[[y]], na.rm = TRUE) * 1.15,
+    x_pos = min(meta[[x]], na.rm = TRUE) * 1.05
+   )
+
+wgtt_ch4_correlation <-
+  meta %>% 
+    select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+             x = test$x_pos, y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1], xlim[2], 10)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(0, ylim[2], 20)
+                       ) +
+    labs(title = "",
+         y = "Fasting breath methane (ppm)",
+         x = "Whole-gut transit time (hours)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+wgtt_ch4_correlation
+```
+
+## 12) Histrogram breath methane
+```{r}
+x <- "fasting_CH4"
+
+xlim <- c(0, paulaR::ceiling_signif(max(meta[[x]], na.rm = T), 1)+10)
+brks <- c(0,1,2,3,4,5,6,7,8,9,10,20,30,40,50,60,70,80)
+
+
+ch4_hist <- meta %>%
+  select(!!sym(x), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x))
+           ) +
+  geom_histogram(
+    fill = methane_uni_color,
+    breaks = brks,
+    closed = "left"
+    ) +
+
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  scale_x_continuous(limits = xlim,
+                     breaks = seq(xlim[1], xlim[2], 20)) +
+
+  scale_y_continuous(limits = c(0, 30),
+                     breaks = seq(0, 30, 10)) + 
+    labs(title = "",
+         x = "Fasting breath methane (ppm)",
+         y = "Number of subjects"
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+
+ch4_hist
+```
+
+## 13) Histogram breath methane, day 2 and day 9
+```{r}
+x <- "Day_2"
+
+ch4_hist_d2 <- breath_data_all %>%
+  select(!!sym(x), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x))
+           ) +
+  geom_histogram(
+      fill = methane_uni_color,
+      breaks = c(0, 1, 5, 10, 20, 30, 40, 50, 60, 70),
+      closed = "left"
+    ) +
+   geom_vline(xintercept = 10, linetype = "dashed") +
+  scale_x_continuous(limits = xlim,
+                     breaks = seq(xlim[1], xlim[2], 20)) +
+  scale_y_continuous(limits = c(0, 30),
+                     breaks = seq(0, 30, 10)) + 
+    labs(title = "",
+         x = "Fasting breath methane on day 2 (ppm)",
+         y = "Number of subjects"
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+
+x <- "Day_9"
+
+ch4_hist_d9 <- breath_data_all %>%
+  select(!!sym(x), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x))
+           ) +
+  geom_histogram(
+      fill = methane_uni_color,
+      breaks = c(0, 1, 5, 10, 20, 30, 40, 50, 60, 70),
+      closed = "left"
+    ) +
+   geom_vline(xintercept = 10, linetype = "dashed") +
+  scale_x_continuous(limits = xlim,
+                     breaks = seq(xlim[1], xlim[2], 20)) +
+  scale_y_continuous(limits = c(0, 30),
+                     breaks = seq(0, 30, 10)) + 
+    labs(title = "",
+         x = "Fasting breath methane on day 9 (ppm)",
+         y = "Number of subjects"
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+```
+
+## 14) Histogram Archaea
+```{r}
+x <- "archaea_inv_ct"
+
+
+xlim <- c(paulaR::trunc_signif(min(meta[[x]], na.rm = T), -2)-0.001,
+          paulaR::ceiling_signif(max(meta[[x]], na.rm = T), -2)+0.001)
+
+arc_hist <- meta %>%
+  select(!!sym(x), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x))
+           ) +
+  geom_histogram(
+    fill = methane_uni_color,
+   breaks = seq(xlim[1]+0.001, xlim[2]-0.001, 0.005),
+   closed = "left"
+    ) +
+  scale_x_continuous(limits = xlim,
+                     breaks = seq(xlim[1]+0.001, xlim[2]-0.001, 0.01)
+                     ) +
+  scale_y_continuous(limits = c(0, 40), 
+                     breaks = seq(0, 40, 10)) + 
+    labs(title = "",
+         x = "Archaea qPCR signal (1/Ct)",
+         y = "Number of subjects"
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+
+arc_hist
+```
+
+
+## 15) Histogram smithii
+```{r}
+x <- "smithii_inv_ct"
+
+xlim <- c(-0.001,
+          paulaR::ceiling_signif(max(meta[[x]], na.rm = T), -2)+0.01)
+
+
+smi_hist <- meta %>%
+  select(!!sym(x), !!sym(params$methane_group)) %>% 
+  mutate(!!sym(x) := ifelse(is.na(!!sym(x)), 0, !!sym(x))) %>% 
+  ggplot(aes(x = !!sym(x))
+           ) +
+  geom_histogram(
+    fill = methane_uni_color,
+    breaks = seq(xlim[1]+0.001, xlim[2], 0.005),
+    closed = "left"
+    ) +
+  scale_x_continuous(limits = xlim,
+                     breaks = seq(xlim[1]+0.001, xlim[2], 0.02),
+                     labels = c("0\n(not detected)", 0.02, 0.04, 0.06)
+                     ) +
+  scale_y_continuous(limits = c(0, 32),
+                     breaks = seq(0, 32, 10)) +
+    labs(title = "",
+         x = "M. smithii qPCR signal (1/Ct)",
+         y = "Number of subjects"
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+
+
+smi_hist
+```
+
+## 16) Archaea qpcr log10 and inv ct
+```{r}
+x <- "archaea_inv_ct"
+y <- "archaea_qpcr_log10"
+
+xlim <- c(0.025, 0.06)
+ylim <- c(5,11)
+
+meta %>% 
+    select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    scale_x_continuous(limits = xlim,
+                        breaks = seq(xlim[1]+0.005, xlim[2], 0.01)
+                       ) +
+    scale_y_continuous(limits = ylim,
+                        breaks = seq(ylim[1], ylim[2], 1)
+                       ) +
+    labs(title = "",
+         y = "log10(copies/g)",
+         x = "1/Ct",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom")
+```
+
+## 17) Hydrogen and groups
+```{r}
+x <- params$methane_group
+y <- "fasting_H2"
+
+ylim <- c(paulaR::trunc_signif(min(meta[[y]], na.rm = F), 0),
+          paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1))
+
+model_data <- meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     na.omit()
+
+subject_counts <- model_data %>% 
+  group_by(group = !!sym(x)) %>% 
+  count()
+
+labels <- setNames(
+  paste0(subject_counts$group, "\n(N=", subject_counts$n, ")"),
+  subject_counts$group
+)
+
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      model_data,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    y.position = max(model_data[[y]], na.rm = TRUE) * 1.05
+    )
+
+h2_groups_boxplot <- 
+  model_data %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black",
+                  show.legend = FALSE) +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6,
+                  show.legend = TRUE) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  scale_x_discrete(labels = labels) +
+     labs(title = "",
+          y = "Fasting breath hydrogen (ppm)",
+          x = "",
+          ) +
+    coord_cartesian(ylim = ylim, 
+                    ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(ylim[1], ylim[2], 20)) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none")
+
+h2_groups_boxplot
+```
+
+
+# Create figure 1
+```{r}
+fig_1 <- 
+( # A
+  (ch4_hist +
+      theme(legend.position = "none", 
+            plot.margin = margin(6, 0, 20, 6))) +
+
+    # B
+  (arc_ch4_correlation + 
+      theme(plot.margin = margin(6, 0, 20, 6)
+                                )) +
+
+     # C
+   (smi_ch4_correlation  +
+      theme(legend.position = "none",
+            plot.margin = margin(6, 0, 20, 6))) +
+    
+         # D
+   (ch4_groups_boxplot  +
+      geom_hline(yintercept = 10, linetype = "dashed") +
+      theme(legend.position = "none",
+            plot.margin = margin(6, 0, 6, 6)))  +
+
+    # E
+  (arc_groups_boxplot  +
+           labs(fill = "") + 
+      theme(legend.position = "bottom",
+            legend.justification = "center",
+            plot.margin = margin(6, 0, 6, 6))) +
+     # F
+   (smi_groups_boxplot  + 
+      theme(legend.position = "none", 
+            plot.margin = margin(6, 0, 6, 6)))
+   
+) +
+  plot_layout(ncol = 3, byrow = TRUE) +
+  plot_annotation(tag_levels = list(c("B", "C", "D", "E", "F", "G")))
+
+
+fig_1
+```
+
+
+# Save figures
+## Independent figures
+```{r}
+format <- "png" # png # pdf
+
+ch4_day2_day9_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_Day2_Day9_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 3.5,
+       dpi = 300)
+
+ch4_groups_boxplot
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_groups_boxplot.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+arc_ch4_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_Archaea_CH4_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+arc_groups_boxplot
+ggsave(glue("{fig_dir}/{params$markdown_id}_Archaea_groups_boxplot.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+smi_ch4_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_M_smithii_CH4_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+smi_groups_boxplot +
+  labs(caption = "Samples only shown if M. smithii detected.") +
+  theme(plot.caption = element_text(size = 10))
+ggsave(glue("{fig_dir}/{params$markdown_id}_M_smithii_groups_boxplot.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+h2_ch4_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_H2_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+arc_smi_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_Archaea_M_smithii_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+arc_m1_m2_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_Archaea_M1_M2_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+smi_m1_m2_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_M_smithii_M1_M2_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+wgtt_ch4_correlation
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_WGTT_correlation.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+ch4_hist
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_histogram.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+ch4_hist
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_histogram_threshold.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+
+ch4_hist_d2
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_histogram_day2.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+ch4_hist_d9 
+ggsave(glue("{fig_dir}/{params$markdown_id}_CH4_histogram_day9.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+```
+
+
+## Fig 1 joined
+```{r}
+format <- "png" # png # pdf
+
+
+fig_1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_1_panel_B_F.{format}"),
+       bg = "white",
+       width = 10,
+       height = 8,
+       dpi = 300)
+```
+
+## Supl figures
+```{r}
+arc_hist + smi_hist + plot_annotation(tag_levels = "A")
+
+ggsave(glue("{fig_dir}/{params$markdown_id}_Archaea_Msmithii_histograms.{format}"),
+       bg = "white",
+       width = 8,
+       height = 4,
+       dpi = 300)
+
+
+h2_ch4_correlation + h2_groups_boxplot + plot_annotation(tag_levels = "A")
+
+ggsave(glue("{fig_dir}/{params$markdown_id}_H2_CH4_corr_boxplot.{format}"),
+       bg = "white",
+       width = 8,
+       height = 4,
+       dpi = 300)
+
+
+saveRDS(wgtt_ch4_correlation,
+        glue("{rds_dir}/{params$markdown_id}_WGTT_CH4_correlation.rds"))
+```
+
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
