@@ -1,0 +1,702 @@
+---
+title: "Join interesting figures from microbiome analyses"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "190"
+  methane_group: "Methane_group"
+
+
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(officer)
+library(gtsummary)
+```
+
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+ft_theme <-  function(ft,
+                             font_size = 10,
+                             header_fill = "gray85") {
+
+  ft |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = font_size, part = "all") |>
+    
+    color(color = "black", part = "all") |>
+    
+    bg(bg = "white", part = "body") |>
+    bg(bg = header_fill, part = "header") |>
+    
+    bold(part = "header") |>
+    color(color = "black", part = "header") |>
+
+    border_remove() |>
+
+    hline_top(
+      border = fp_border(color = "black", width = 1.2),
+      part = "header"
+    ) |>
+
+    hline(
+      i = 1,
+      border = fp_border(color = "black", width = 0.8),
+      part = "header"
+    ) |>
+
+    hline_bottom(
+      border = fp_border(color = "black", width = 1.2),
+      part = "body"
+    ) |>
+
+    autofit()
+}
+```
+
+
+# Read tables
+```{r}
+bsl_char_raw <- readRDS(glue("{rds_dir}/111_baseline_table_means.rds"))
+
+ph_gc_raw <- readRDS(glue("{rds_dir}/123_ph_methane_group_wilcoxon.rds"))
+tt_gc_raw <- readRDS(glue("{rds_dir}/123_tt_methane_group_wilcoxon.rds"))
+
+gut_gc_raw <- readRDS(glue("{rds_dir}/121_gut_factors_methane_group_tt_linear_models.rds"))
+
+alpha_gc_raw <- readRDS(glue("{rds_dir}/141_alpha_div_methane_tt_linear_models.rds"))
+alpha_cor_raw <- readRDS(glue("{rds_dir}/141_alpha_div_correlation_linear_models.rds"))
+
+ub_gc_raw <- readRDS(glue("{rds_dir}/142_genus_counts_ub_methane_group_tt_linear_models.rds"))
+
+scfa_gc_raw <- readRDS(glue("{rds_dir}/171_dry_long_scfa_methane_group_comparison.rds"))
+scfa_cor_raw <- readRDS(glue("{rds_dir}/171_dry_long_scfa_correlation.rds"))
+
+diet_gc_raw <- readRDS(glue("{rds_dir}/161_means_diet_methane_group_comparison.rds"))
+```
+
+# Clean tables
+
+## 1) BSL characteristics
+```{r}
+bsl_char <- bsl_char_raw %>%
+  as_flex_table() %>% 
+  ft_theme() %>% 
+  autofit()
+
+bsl_char
+```
+
+## 2) pH group comp (wilcox)
+```{r}
+ph_gc <- ph_gc_raw %>% 
+ mutate(across(where(is.numeric), round, 3)) %>% 
+  mutate(hmp_mean_sd = str_c(
+    mean_HMP, " (", sd_HMP, ")",
+    sep = "")) %>% 
+    mutate(lmp_mean_sd = str_c(
+    mean_LMP, " (", sd_LMP, ")",
+    sep = "")) %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Segment" = "pH segment",
+         "pH HMP, mean (SD)" = hmp_mean_sd,
+         "pH LMP, mean (SD)" = lmp_mean_sd,
+         "p" = "p",
+         "q" = "FDR",
+         " *") %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  autofit()
+
+ph_gc
+```
+
+## 3) TT group comp (wilcox)
+```{r}
+tt_gc <- tt_gc_raw %>% 
+ mutate(across(where(is.numeric), round, 3)) %>% 
+  mutate(hmp_mean_sd = str_c(
+    mean_HMP, " (", sd_HMP, ")",
+    sep = "")) %>% 
+    mutate(lmp_mean_sd = str_c(
+    mean_LMP, " (", sd_LMP, ")",
+    sep = "")) %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select(Variable,
+         "Hours HMP, mean (SD)" = hmp_mean_sd,
+         "Hours LMP, mean (SD)" = lmp_mean_sd,
+         "p" = "p",
+         "q" = "FDR",
+         " *") %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  autofit()
+
+tt_gc
+```
+
+## 4) Gut group comp (mixed lm) 
+```{r}
+gut_gc <-
+gut_gc_raw %>% 
+  filter(adjusted_by %in% c("Subject_ID", "", "WGTT", "WGTT, Subject_ID")) %>% 
+  mutate(response = factor(response, levels = gut_gc_raw$response %>% unique())) %>% 
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    "",  "Subject_ID", "WGTT", "WGTT, Subject_ID"
+  ))) %>% 
+  arrange(adjusted_by) %>% 
+  mutate(Test = case_when(
+    adjusted_by == "" ~ "CS LM, unadjusted",
+    adjusted_by == "Subject_ID" ~ "Long. LMM, adjusted for subject",
+    adjusted_by == "WGTT" ~ "CS LM, adjusted for WGTT",
+    adjusted_by == "WGTT, Subject_ID" ~ "Long. LMM, adjusted for WGTT and subject"
+  )) %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Variable" = response,
+         "Test",
+         "STD β" = estimate, # here the raw estimate is already STD
+         "p" = p,
+         "q" = FDR,
+         " *") %>% 
+   mutate(across(where(is.numeric), round, 3)) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+  #hline(i = 11, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+gut_gc
+```
+
+## 5)  Alpha group comp
+```{r}
+# here Y was also scaled, thus estimate is directly beta std
+alpha_gc <-
+alpha_gc_raw %>% 
+   filter(adjusted_by %in% c("(1|Subject_ID)", "WGTT + (1|Subject_ID)")) %>% 
+  mutate(response = str_to_sentence(response)) %>% 
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    "(1|Subject_ID)", "WGTT + (1|Subject_ID)"
+  ))) %>% 
+  arrange(adjusted_by) %>% 
+  mutate(Test = case_when(
+    adjusted_by == "(1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+    adjusted_by == "WGTT + (1|Subject_ID)" ~ "Long. LMM, adjusted for WGTT and subject"
+  )) %>%
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Variable" = response,
+         "Test",
+         "STD β" = beta_estimate, # here the raw estimate is already STD
+         "p" = p,
+         "q" = FDR,
+         " *") %>% 
+   mutate(#across(where(is.numeric), round, 3),
+          p = round(p, 4),
+          `q` = round(`q`, 4),
+          `STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = 2, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+alpha_gc
+```
+
+## 6) Alpha corr
+```{r}
+# here Y was also scaled, thus estimate is directly beta std
+alpha_cor <-
+alpha_cor_raw %>% 
+   filter(adjusted_by %in% c("", "(1|Subject_ID)")) %>% 
+  mutate(response = str_to_sentence(response)) %>% 
+  mutate(predictor = case_when(
+    predictor == "fasting_CH4" ~ "Fasting breath methane",
+    predictor == "fasting_H2" ~ "Fasting breath hydrogen",
+    predictor == "smithii_inv_ct" ~ "M. smithii",
+    predictor == "archaea_inv_ct" ~ "Archaea",
+    predictor == "bacterial_load_wet" ~ "Microbial load",
+    predictor == "stool_energy" ~ "Energy density",
+    predictor == "ph_proximal_colon" ~ "Proximal colonic pH",
+  )) %>% 
+  mutate(predictor = factor(predictor, levels = c(
+    "Fasting breath methane",
+    "Fasting breath hydrogen",
+    "M. smithii",
+    "Archaea",
+    "Microbial load",
+    "Energy density",
+    "Proximal colonic pH"
+  ))) %>% 
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+   "",  "(1|Subject_ID)"
+  ))) %>% 
+  arrange(predictor) %>% 
+  mutate(Test = case_when(
+    adjusted_by == "" ~ "CS LM, unadjusted",
+    adjusted_by == "(1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+  )) %>% 
+  # We need to do FDR again
+  group_by(Test) %>% 
+  mutate(FDR = p.adjust(p, "BH")) %>% 
+  ungroup() %>%
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Predictor" = predictor,
+         "Response" = response,
+         "Test",
+         "STD β" = estimate, # remember that here the raw estimate is already STD
+         "p" = p,
+         "q" = FDR,
+         " *") %>% 
+   mutate(#across(where(is.numeric), round, 3),
+          p = round(p, 4),
+          `q` = round(`q`, 4),
+          `STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  autofit() 
+
+alpha_cor
+```
+
+## 7) Microbiome group comp
+```{r}
+ub_gc <- 
+ub_gc_raw %>% 
+  filter(adjusted_by %in% c("(1|Subject_ID)", "WGTT + (1|Subject_ID)")) %>% 
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    "(1|Subject_ID)", "WGTT + (1|Subject_ID)"
+  ))) %>% 
+  arrange(adjusted_by) %>% 
+  mutate(Test = case_when(
+    adjusted_by == "(1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+    adjusted_by == "WGTT + (1|Subject_ID)" ~ "Long. LMM, adjusted for WGTT and subject"
+  )) %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Variable" = response,
+         "Test",
+         "STD β" = estimate_std,
+         "p" = p,
+         "q" = FDR, 
+         " *") %>% 
+   mutate(across(where(is.numeric), round, 3),
+          #P = round(P, 4),
+          #`FDR-adjusted q` = round(`FDR-adjusted q`, 4),
+          #`STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = 84, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+ub_gc
+```
+
+## 8) Faecal SCFA group comp
+```{r}
+f_gc <- 
+scfa_gc_raw %>% 
+  filter(type_response == "fecal") %>% 
+  filter(adjusted_by %in% c(", (1|Subject_ID)", "WGTT, (1|Subject_ID)")) %>% 
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    ", (1|Subject_ID)", "WGTT, (1|Subject_ID)"
+  ))) %>%
+  arrange(adjusted_by) %>% 
+  mutate(Test = case_when(
+    adjusted_by == ", (1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+    adjusted_by == "WGTT, (1|Subject_ID)" ~ "Long. LMM, adjusted for WGTT and subject"
+  ))  %>% 
+  mutate(response = str_remove(response, "f_")) %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Variable" = response,
+         "Test",
+         "STD β" = estimate_std,
+         "p" = p,
+         "q" = FDR, 
+         " *") %>% 
+   mutate(across(where(is.numeric), round, 3),
+          #P = round(P, 4),
+          #`FDR-adjusted q` = round(`FDR-adjusted q`, 4),
+          #`STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = 8, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+f_gc
+```
+
+## 9) Plasma SCFA group comp
+```{r}
+p_gc <- 
+scfa_gc_raw %>% 
+  filter(type_response == "plasma") %>% 
+  filter(adjusted_by %in% c(", (1|Subject_ID)", "WGTT, (1|Subject_ID)")) %>% 
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    ", (1|Subject_ID)", "WGTT, (1|Subject_ID)"
+  ))) %>%
+  arrange(adjusted_by) %>% 
+  mutate(Test = case_when(
+    adjusted_by == ", (1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+    adjusted_by == "WGTT, (1|Subject_ID)" ~ "Long. LMM, adjusted for WGTT and subject"
+  ))  %>% 
+  mutate(response = str_remove(response, "p_")) %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Variable" = response,
+         "Test",
+         "STD β" = estimate_std,
+         "p" = p,
+         "q" = FDR, 
+         " *") %>% 
+   mutate(across(where(is.numeric), round, 3),
+          #P = round(P, 4),
+          #`FDR-adjusted q` = round(`FDR-adjusted q`, 4),
+          #`STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = 7, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+p_gc
+```
+
+## 10) Plasma SCFA correlation
+```{r}
+p_cor <- 
+scfa_cor_raw %>% 
+  filter(type_response == "plasma",
+         type_predictor %in% c("breath", "methanogens", "pH")) %>% 
+  mutate(type_predictor = forcats::fct_collapse(
+      type_predictor,
+      "breath_methanogens" = c("breath", "methanogens")
+    )
+  )  %>% 
+  filter(adjusted_by %in% c("", "(1|Subject_ID)")) %>%
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    "", "(1|Subject_ID)"
+  ))) %>%
+  arrange(type_predictor) %>% 
+  mutate(Test = case_when(
+    adjusted_by == "" ~ "CS LM, unadjusted",
+    adjusted_by == "(1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+  ))   %>% 
+  mutate(predictor = case_when(
+    predictor == "fasting_CH4" ~ "Fasting breath methane",
+    predictor == "fasting_H2" ~ "Fasting breath hydrogen",
+    predictor == "smithii_inv_ct" ~ "M. smithii",
+    predictor == "archaea_inv_ct" ~ "Archaea",
+    predictor == "ph_proximal_colon" ~ "Proximal colonic pH",
+    predictor == "ph_distal_colon" ~ "Distal colonic pH",
+    predictor == "ph_sigmoid_colon" ~ "Sigmoid colonic pH",
+    TRUE ~ NA
+  )) %>% 
+  filter(!is.na(predictor)) %>% 
+  mutate(predictor = factor(predictor, levels = c(
+    "Fasting breath methane",
+    "Fasting breath hydrogen",
+    "M. smithii",
+    "Archaea",
+    "Proximal colonic pH",
+    "Distal colonic pH",
+    "Sigmoid colonic pH"
+  ))) %>%
+  mutate(response = str_remove(response, "p_")) %>% 
+  # redo fdr after filtering
+  group_by(type_predictor) %>% 
+  mutate(FDR = p.adjust(p, "BH")) %>% 
+  ungroup() %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Predictor" = predictor,
+         "Response" = response,
+         "Test",
+         "STD β" = estimate_std,
+         "p" = p,
+         "q" = FDR, 
+         " *") %>% 
+   mutate(across(where(is.numeric), round, 3),
+          #P = round(P, 4),
+          #`FDR-adjusted q` = round(`FDR-adjusted q`, 4),
+          #`STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = 28, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+p_cor
+```
+
+## 11) Faecal SCFA correlation
+```{r}
+f_cor <- 
+scfa_cor_raw %>% 
+  filter(type_response == "fecal",
+         type_predictor %in% c("breath", "methanogens", "pH")) %>% 
+  mutate(type_predictor = forcats::fct_collapse(
+      type_predictor,
+      "breath_methanogens" = c("breath", "methanogens")
+    )
+  )  %>% 
+  filter(adjusted_by %in% c("", "(1|Subject_ID)")) %>%
+  mutate(adjusted_by = factor(adjusted_by, levels = c(
+    "", "(1|Subject_ID)"
+  ))) %>%
+  arrange(type_predictor) %>% 
+  mutate(Test = case_when(
+    adjusted_by == "" ~ "CS LM, unadjusted",
+    adjusted_by == "(1|Subject_ID)" ~ "Long. LMM, adjusted for subject",
+  ))   %>% 
+  mutate(predictor = case_when(
+    predictor == "fasting_CH4" ~ "Fasting breath methane",
+    predictor == "fasting_H2" ~ "Fasting breath hydrogen",
+    predictor == "smithii_inv_ct" ~ "M. smithii",
+    predictor == "archaea_inv_ct" ~ "Archaea",
+    predictor == "ph_proximal_colon" ~ "Proximal colonic pH",
+    predictor == "ph_distal_colon" ~ "Distal colonic pH",
+    predictor == "ph_sigmoid_colon" ~ "Sigmoid colonic pH",
+    TRUE ~ NA
+  )) %>% 
+  filter(!is.na(predictor)) %>% 
+  mutate(predictor = factor(predictor, levels = c(
+    "Fasting breath methane",
+    "Fasting breath hydrogen",
+    "M. smithii",
+    "Archaea",
+    "Proximal colonic pH",
+    "Distal colonic pH",
+    "Sigmoid colonic pH"
+  ))) %>%
+  mutate(response = str_remove(response, "f_")) %>% 
+  # redo fdr after filtering
+  group_by(type_predictor) %>% 
+  mutate(FDR = p.adjust(p, "BH")) %>% 
+  ungroup() %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  select("Predictor" = predictor,
+         "Response" = response,
+         "Test",
+         "STD β" = estimate_std,
+         "p" = p,
+         "q" = FDR, 
+         " *") %>% 
+   mutate(across(where(is.numeric), round, 3),
+          #P = round(P, 4),
+          #`FDR-adjusted q` = round(`FDR-adjusted q`, 4),
+          #`STD β` = round(`STD β`, 3)
+          ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = 32, border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+f_cor
+```
+
+## 12) Diet group comp
+```{r}
+diet_gc <-
+diet_gc_raw %>% 
+  filter(response %in% c(
+    "total_kcal",
+    "carbohydrate",
+    "fat",
+    "protein",
+    "fish_per_1000_kcal",
+    "meat_per_1000_kcal",
+    "fibre_per_1000_kcal",
+    "nuts_per_1000_kcal",
+    "whole_grain_per_1000_kcal",
+    "fruit_vegetables_per_1000_kcal"
+  )) %>% 
+  mutate(response = factor(response, levels = c(
+    "total_kcal",
+    "carbohydrate",
+    "fat",
+    "protein",
+    "fish_per_1000_kcal",
+    "meat_per_1000_kcal",
+    "fibre_per_1000_kcal",
+    "nuts_per_1000_kcal",
+    "whole_grain_per_1000_kcal",
+    "fruit_vegetables_per_1000_kcal"
+  ))) %>% 
+  arrange(response) %>% 
+  mutate(Variable = case_when(
+    response == "total_kcal" ~ "Total energy (kcal)",
+    response == "carbohydrate" ~ "Carbohydrate (g)",
+    response == "fat" ~ "Fat (g)",
+    response == "protein" ~ "Protein (g)",
+    response == "fish_per_1000_kcal" ~ "Fish (g per 1000 kcal)",
+    response == "meat_per_1000_kcal" ~ "Meat (g per 1000 kcal)",
+    response == "fibre_per_1000_kcal" ~ "Fibre (g per 1000 kcal)",
+    response == "nuts_per_1000_kcal" ~ "Nuts (g per 1000 kcal)",
+    response == "whole_grain_per_1000_kcal" ~ "Whole-grain (g per 1000 kcal)",
+    response == "fruit_vegetables_per_1000_kcal" ~ "Fruit and vegetables (g per 1000 kcal)"
+  )) %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  mutate(group = case_when(
+    str_detect(response, "fish") ~ "fish_meat",
+    str_detect(response, "meat") ~ "fish_meat",
+    str_detect(response, "_per_1000_kcal") ~ "fibre_groups",
+    response == "total_kcal" ~ "total_energy",
+    TRUE ~ "macronutrients"
+  )) %>% 
+  ## redo FDR
+  group_by(group) %>% 
+  mutate(FDR = round(p.adjust(p, "BH"), 3)) %>% 
+  ungroup %>% 
+  mutate(" *" = case_when(
+    p<0.05 & FDR<0.1 ~ "●",
+    p<0.05  ~ "*",
+    TRUE ~ "")) %>% 
+  mutate(hmp_mean_sd = str_c(
+    round(mean_HMP, 1), " (", round(sd_HMP, 1), ")",
+    sep = "")) %>% 
+    mutate(lmp_mean_sd = str_c(
+    round(mean_LMP, 1), " (", round(sd_LMP, 1), ")",
+    sep = "")) %>% 
+  mutate(Test = "Wilcoxon rank-sum test") %>% 
+  select(Variable,
+         "HMP, mean (SD)" = hmp_mean_sd,
+         "LMP, mean (SD)" = lmp_mean_sd,
+         # Test,
+         "p" = p,
+         "q" = FDR,
+         " *"
+         ) %>% 
+  flextable() %>% 
+  ft_theme() %>% 
+  # to separate the fdr adjustment
+ hline(i = c(1,4,6), border = fp_border(color = "black", width = 1)) %>% 
+  autofit() 
+
+diet_gc
+```
+
+
+# Save results
+```{r}
+ft_list <- list(bsl_char, ph_gc, tt_gc, gut_gc,
+                alpha_gc, alpha_cor, ub_gc,
+                f_gc, p_gc, p_cor, f_cor,
+                diet_gc)
+
+is_landscape <- c(FALSE, FALSE, FALSE, FALSE,
+                  FALSE, FALSE, TRUE,
+                  FALSE, FALSE, FALSE, FALSE,
+                  FALSE)
+
+doc <- read_docx()
+walk2(ft_list,
+      seq_along(ft_list),
+      function(ft, i) {
+        
+  # add table     
+  doc <<- doc %>%
+    body_add_par(paste("Supplementary Table", i),
+                 style = "Normal") %>%
+     body_add_par(" ", style = "Normal") %>% 
+    body_add_flextable(ft)
+  
+  
+  # decide page layout 
+  if (i == 1){
+    doc <<- body_end_section_portrait(doc)
+  } else if (is_landscape[i]) {
+       doc <<- body_end_section_landscape(doc)
+   } else if (!is_landscape[i]) {
+       doc <<- body_end_section_portrait(doc)
+}
+
+  
+})
+
+print(doc,
+      glue("{word_dir}/{params$markdown_id}_Supplementary_Tables.docx"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
