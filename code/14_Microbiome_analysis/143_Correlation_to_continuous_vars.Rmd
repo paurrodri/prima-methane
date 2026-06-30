@@ -1,0 +1,669 @@
+---
+title: "Microbiome correlations to continuous variables, linear models"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "143_genus_counts_mixed" # can be: "143_asv_counts_mixed" or "143_genus_counts_mixed" 
+  methane_group: "Methane_group"
+  
+  microbiome_filename: genus_counts_filename # can be: "asv_counts_filename", or "genus_counts_filename"
+  
+  tax_level: "genus" # can be: "ASV" or "genus"
+  is_ub_means: FALSE # should be: FALSE
+  mixed: TRUE # should be: TRUE
+      # mixed means that we are doing the correlations differently
+      # if the variable has 2 or less repeated measures, we do LM on means data, not adjusting for Subject ID
+      # if the variable has 3 or more repeated measured, we do LMM adjusting for Subject ID
+      # this is also done like this in markdown 121 and 171
+  
+  # thresholds: equal or above
+  abu_filter_perc: 0.01 # 0.01 perc, this works if microbiome data rowSums() is 100
+  prev_filter_perc: 0.1 # 10% of samples
+  
+  cor_method: "spearman"
+  pseudocount: 1e-6
+---
+
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(phyloseq)
+library(vegan)
+library(effsize)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+## General aesthetics
+```{r}
+fontsize <- 14
+```
+
+# Read data
+## Meta
+```{r}
+if (params$is_ub_means){
+  meta_raw <- readRDS(meta_means_filename)
+} else {
+  meta_raw <- readRDS(meta_all_filename)
+}
+```
+
+## Microbiome (μb) data
+```{r}
+ub_raw     <- readRDS(get(params$microbiome_filename))
+
+
+# for abundance filtering, one needs the rel abundances file
+ub_rar_relabu_filename <- params$microbiome_filename %>% str_replace("counts", "rar_relabu")
+ub_rar_relabu_raw <- readRDS(get(ub_rar_relabu_filename))
+
+
+taxonomic_annotation <- readRDS(taxonomic_annotation_filename)
+```
+
+# Clean data
+```{r}
+# meta & ub: nothing needed for now
+meta <- meta_raw %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+
+if (params$is_ub_means){
+  ub   <- ub_raw %>% 
+  filter(Subject_ID %in% meta$Subject_ID)
+  
+   ub_rar_relabu   <- ub_rar_relabu_raw %>% 
+  filter(Subject_ID %in% meta$Subject_ID)
+   
+   
+} else {
+  ub   <- ub_raw %>% 
+  filter(Sample_ID %in% meta$Sample_ID)
+  
+  ub_rar_relabu   <- ub_rar_relabu_raw %>% 
+  filter(Sample_ID %in% meta$Sample_ID)
+}
+
+
+```
+
+
+# Prepare data
+
+## Prev and abu filtering
+```{r}
+prev     <- colMeans(ub[, -1] > 0)
+prev_filter <- prev >= params$prev_filter_perc
+
+
+# for abundance filtering, one actually needs the rel abu file
+mean_abu <- colMeans(ub_rar_relabu[, -1]) 
+abu_filter  <- mean_abu >= params$abu_filter_perc
+
+filtered_taxa <- names(abu_filter & prev_filter)[abu_filter & prev_filter]
+```
+
+## Prepare data for models
+```{r}
+vars_of_interest <- c("fasting_CH4",
+                      "fasting_H2",
+                      "smithii_inv_ct",
+                      "archaea_inv_ct",
+                      "ph_proximal_colon",
+                      "stool_energy", 
+                      "bacterial_load_wet"
+                      )
+# confounders
+tt_vars <- c("GET", "SBTT", "CTT", "SLBTT", "WGTT")
+
+# variables where we actually need to use means (if mixed)
+vars_for_means <- c("stool_energy",
+                    "cn_ratio",
+                    "ph_small_bowel",
+                    "ph_colon",
+                    "ph_proximal_colon",
+                    "ph_distal_colon",
+                    "ph_sigmoid_colon",
+                    "ph_rectum",
+                    "fasting_CH4",
+                    "fasting_H2",
+                    "smithii_inv_ct",
+                    "archaea_inv_ct",
+                    "glp1")
+
+
+if (params$is_ub_means){
+  
+  # not used for the models
+  ub_meta <- ub %>% 
+    # filter taxa
+    select(Subject_ID, all_of(filtered_taxa)) %>% 
+    left_join(meta %>% 
+                select(Subject_ID,
+                       !!sym(params$methane_group),
+                       all_of(tt_vars),
+                       all_of(vars_of_interest)
+                       ),
+              by = "Subject_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Subject_ID")
+  
+  # clr-transformed data
+  ub_clr_meta <- 
+    ub %>%
+  # filter taxa
+  select(Subject_ID, all_of(filtered_taxa)) %>% 
+  # clr transformation
+  mutate(across(all_of(filtered_taxa), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Subject_ID),
+      compositions::clr(select(., all_of(filtered_taxa)))
+      )
+  } %>%
+    left_join(meta %>% 
+                select(Subject_ID,
+                       !!sym(params$methane_group),
+                       all_of(tt_vars),
+                       all_of(vars_of_interest)
+                       ),
+              by = "Subject_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Subject_ID")
+  
+  
+} else {
+  # not used for the models
+  ub_meta <- ub %>%
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") %>% 
+  # filter taxa
+  select(Sample_ID, Subject_ID, all_of(filtered_taxa)) %>% 
+  left_join(meta %>% 
+              select(Sample_ID,
+                     !!sym(params$methane_group),
+                     all_of(tt_vars),
+                       all_of(vars_of_interest)
+                     ),
+            by = "Sample_ID") %>% 
+  relocate(!!sym(params$methane_group), .after = "Subject_ID")
+  
+  
+   # clr-transformed data
+  ub_clr_meta <- ub %>%
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") %>% 
+  # filter taxa
+  select(Sample_ID, Subject_ID, all_of(filtered_taxa)) %>% 
+  # clr transformation
+  mutate(across(all_of(filtered_taxa), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Sample_ID, Subject_ID),
+      compositions::clr(select(., all_of(filtered_taxa)))
+      )
+  } %>%
+  left_join(meta %>% 
+              select(Sample_ID,
+                     !!sym(params$methane_group),
+                     all_of(tt_vars),
+                     all_of(vars_of_interest)
+                     ),
+            by = "Sample_ID") %>% 
+  relocate(!!sym(params$methane_group), .after = "Subject_ID")
+   
+  
+  if (params$mixed){
+    
+    # then compute mean counts
+    ub_meta_means <-  ub_meta %>% 
+      select(-Sample_ID, -!!sym(params$methane_group)) %>% 
+      group_by(Subject_ID) %>% 
+       summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>% 
+      left_join(ub_meta %>% 
+                  select(Subject_ID, !!sym(params$methane_group)) %>%
+                  distinct(),
+                by = "Subject_ID") %>% 
+      relocate(!!sym(params$methane_group), .after = "Subject_ID")
+    
+    # CLR-transform the mean counts
+   ub_clr_meta_means <-
+      ub_meta_means %>%
+        # clr transformation
+        mutate(across(all_of(filtered_taxa), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Subject_ID),
+      compositions::clr(select(., all_of(filtered_taxa)))
+      )
+  } %>%
+  left_join(ub_meta_means %>% 
+              select(Subject_ID,
+                     !!sym(params$methane_group),
+                     all_of(tt_vars),
+                     all_of(vars_of_interest)
+                     ),
+            by = "Subject_ID") %>% 
+  relocate(!!sym(params$methane_group), .after = "Subject_ID")
+  
+  
+}}
+```
+
+
+
+# Linear models
+
+## Adjustment only by Subject_ID as random effect (adjustment only if longitudinal)
+```{r}
+n_total <- nrow(ub_meta)
+
+combi <- expand_grid(y = filtered_taxa,
+                       x = vars_of_interest)
+
+lm_unadj_res <- pmap(combi, function(y, x){
+
+  if (params$mixed){
+      
+      model_data <- ub_clr_meta_means %>% 
+        select(all_of(c(x, y, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+      
+    } else {
+  model_data <- ub_clr_meta %>%
+      dplyr::select(all_of(c(x, y, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+  }
+  
+  n_tested <- nrow(model_data)
+  
+  if (params$is_ub_means | params$mixed){
+    
+    f <- as.formula(paste0("`", y, "` ~ scale(`", x, "`)"))
+    random_effect <- ""
+    model <- lm(f, data = model_data)
+  
+  } else {
+
+    f <- as.formula(paste0("`", y, "` ~ scale(`", x, "`) + (1|Subject_ID)"))
+    random_effect <- "(1|Subject_ID)"
+    model <- lmerTest::lmer(f, data = model_data)
+
+  }
+    
+  # extract pvalue
+  pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+
+    
+  # extract unstandardized coefficient
+  coef    <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+  se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_low  <- coef - 1.96 * se
+  ci_high <- coef + 1.96 * se
+  
+  
+  # extract std beta (in CLR units if model data not QMP)
+  sd_y <- sd(model_data[[y]], na.rm = TRUE)
+  coef_std <- coef / sd_y
+  
+  tibble::tibble(response = y,
+                 predictor = x,
+                 adjusted_by = random_effect,
+                 n_total = glue("{n_tested}/{n_total}"),
+                 estimate_type = "beta coefficient",
+                 estimate = coef,
+                 estimate_std = coef_std,
+                 CI_estimate_lower = ci_low,
+                 CI_estimate_upper = ci_high,
+                 p = pval,
+                 estimate_confounder = NA,
+                 p_confounder = NA
+                 )
+
+}) %>% bind_rows() %>% 
+  group_by(predictor) %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>%
+  ungroup() %>% 
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+
+if (params$tax_level == "ASV"){
+    lm_unadj_res %<>% 
+    left_join(taxonomic_annotation %>% 
+                  select(
+                    !!sym(params$tax_level),
+                    closest_tax),
+                by = c("response" = params$tax_level)) %>% 
+      relocate(c(closest_tax), .after = response)
+  
+  }
+```
+
+## Adjustment by transit time as fixed effect and Subject_ID as random effect (Subject ID adjustment only if longitudinal)
+```{r}
+n_total <- nrow(ub_meta)
+
+combi <- expand_grid(y = filtered_taxa,
+                     x = vars_of_interest,
+                     fixed_effect = tt_vars)
+
+
+lm_adj_res <-
+  pmap(combi, function(y, x, fixed_effect){
+
+    if (params$mixed){
+      
+      model_data <- ub_clr_meta_means %>% 
+        select(all_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+      
+    } else {
+  model_data <- ub_clr_meta %>%
+      dplyr::select(all_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+  }
+  
+    n_tested <- nrow(model_data)
+  
+    random_effect <- if (params$is_ub_means | params$mixed) "" else " + (1|Subject_ID)"
+
+    f <- as.formula(
+      paste0("`", y, "` ~ scale(`", x, "`) + scale(`", fixed_effect, "`)", random_effect)
+    )
+
+   output <- tryCatch({
+
+      model <- if (params$is_ub_means  | params$mixed) {
+        lm(f, data = model_data)
+      } else {
+        lmerTest::lmer(f, data = model_data)
+      }
+
+      sm <- summary(model)$coefficients
+      
+      # extract pvalue
+      pval <- as.numeric(sm[2, "Pr(>|t|)"])
+    
+        
+      # extract unstandardized coefficient
+      coef    <- as.numeric(sm[2, "Estimate"])
+      se      <- as.numeric(sm[2, "Std. Error"])
+      ci_low  <- coef - 1.96 * se
+      ci_high <- coef + 1.96 * se
+  
+    # extract std beta (in CLR units if model data not QMP)
+  sd_y <- sd(model_data[[y]], na.rm = TRUE)
+  coef_std <- coef / sd_y
+      
+
+      tibble::tibble(
+        response = y,
+        predictor = x,
+        adjusted_by = glue::glue("{fixed_effect}{random_effect}"),
+        n_total = glue::glue("{n_tested}/{n_total}"),
+       estimate_type = "beta coefficient",
+       estimate = coef,
+       estimate_std = coef_std,
+       CI_estimate_lower = ci_low,
+       CI_estimate_upper = ci_high,
+        p = pval,
+        estimate_confounder = as.numeric(sm[3, "Estimate"]),
+        p_confounder = as.numeric(sm[3, "Pr(>|t|)"])
+      )
+
+    }, error = function(e) {
+
+      tibble::tibble(
+        response = y,
+        predictor = x,
+        adjusted_by = glue::glue("{fixed_effect}{random_effect}"),
+        n_total = glue::glue("{n_tested}/{n_total}"),
+        estimate_type = "beta coefficient",
+        estimate = NA_real_,
+        estimate_std = NA_real_,
+        CI_estimate_lower = NA_real_,
+        CI_estimate_upper = NA_real_,
+        p = NA_real_,
+        estimate_confounder = NA_real_,
+        p_confounder = NA_real_
+      )
+    })
+        
+        return(output)
+
+}) %>% bind_rows() %>% 
+  group_by(predictor, adjusted_by) %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup() %>%
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+
+
+if (params$tax_level == "ASV"){
+    lm_adj_res %<>% 
+    left_join(taxonomic_annotation %>% 
+                  select(
+                    !!sym(params$tax_level),
+                    closest_tax),
+                by = c("response" = params$tax_level)) %>% 
+      relocate(c(closest_tax), .after = response)
+  
+  }
+```
+
+## Combine all results
+```{r}
+lm_res <- bind_rows(lm_unadj_res, lm_adj_res) %>% 
+  arrange(response, predictor) %>% 
+  # final fdr
+    group_by(adjusted_by) %>%
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup() %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+```
+
+# Extra numbers for paper
+```{r}
+if (params$tax_level == "genus"){
+  # smithii and beduinibacterium
+  lm_unadj_res %>% 
+    filter(str_detect(predictor, "smithii"), response == "Beduinibacterium") %>% 
+    select(response, predictor, estimate_std, p, FDR) %>% 
+    mutate(estimate_std = round(estimate_std, 3),
+           p = round(p, 4), 
+           FDR = round(FDR, 4)) %>% 
+    flextable()
+}
+```
+
+
+
+# Individual figures (potential suplementary)
+##  Beduinibacterium and smithii
+```{r}
+# only if genus
+if (params$tax_level == "genus"){
+  
+  x <- "smithii_inv_ct"
+  y <- "Beduinibacterium"
+  
+  if (params$is_ub_means){
+    
+    res <- np_cor_res %>% 
+      filter(predictor == x,
+             response == y)
+    
+    caption <- glue("{str_to_title(params$cor_method)} correlation.")
+    
+    r_or_beta <- "R"
+    
+  } else {
+    
+    res <- lm_res %>% 
+      filter(predictor == x,
+             response == y,
+             adjusted_by == ""
+             )
+
+    r_or_beta <- "Standardized β"
+
+  }
+  
+  plot_data <- ub_rar_relabu %>% 
+    select(Sample_ID, !!sym(y)) %>% 
+    left_join(meta %>% 
+                select(Sample_ID,
+                       Subject_ID,
+                       !!sym(params$methane_group),
+                       !!sym(x)),
+              by = "Sample_ID") %>% 
+    # compute subject means
+    group_by(Subject_ID, !!sym(params$methane_group)) %>% 
+    summarize(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+    ungroup()
+  
+  xlim <- c(paulaR::trunc_signif(min(plot_data[[x]], na.rm = T), -2),
+          paulaR::ceiling_signif(max(plot_data[[x]], na.rm = T), -2))
+  
+  ylim <- c(-0.02,
+            paulaR::ceiling_signif(max(plot_data[[y]], na.rm = T), -2))
+  
+  
+  res_plot <- tibble(
+      r = res$estimate_std,
+      p = res$p
+    ) %>%
+    mutate(p_lab = ifelse(
+      res$p < 0.001,
+      "p < 0.001",
+      glue("p = {round(res$p, 3)}")
+      ),
+      r_lab = glue("{r_or_beta} = {round(r, 3)}"),
+      label = glue("{r_lab}, {p_lab}"),
+      y_pos = max(plot_data[[y]], na.rm = TRUE),
+      x_pos = min(plot_data[[x]], na.rm = TRUE)
+     )
+  
+
+  # Note the pseudolog scale!!!
+  fig_bedu_smi <-
+    plot_data %>% 
+        select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+    na.omit() %>% 
+      ggplot(aes(x = !!sym(x),
+                 y = !!sym(y))
+             ) +
+      geom_point(aes(fill = !!sym(params$methane_group)), 
+                 shape = 21,
+                 stroke = 1.2,
+                 color = "black",
+                 alpha = 0.6,
+                 size = 3) +
+      scale_fill_manual(values = study_colors$methane) +
+      geom_smooth(method = "lm", color = "black", se = F) +
+      annotate("text",
+               x = xlim[1], 
+               y = res_plot$y_pos + 0.3,
+               label = res_plot$label,
+               size = fontsize/3,
+               hjust = 0) +
+      scale_x_continuous(
+        limits = xlim,
+         breaks = seq(xlim[1], xlim[2], 0.01)
+                         ) +
+      scale_y_continuous(
+        trans = scales::pseudo_log_trans(
+        base = 2, sigma = 0.0001),
+       limits = c(-0.00025, 1),
+       breaks = c(0, 0.001, 0.01, 0.1, 1)
+      ) +
+      labs(title = "",
+           x = "M. smithii qPCR signal (1/Ct)",
+           y = glue("{y},\nrelative abundance (%)"),
+           fill = "",
+      ) +
+      paulaR::white_theme(font_size = fontsize) +
+      theme(legend.position = "bottom")
+  
+  fig_bedu_smi
+}
+```
+
+
+# Save results
+
+## Linear models
+```{r}
+write.xlsx(lm_res,
+             glue("{tab_dir}/{params$markdown_id}_ub_correlations_linear_models.xlsx"))
+
+saveRDS(lm_res,
+             glue("{rds_dir}/{params$markdown_id}_ub_correlations_linear_models.rds"))
+```
+
+## Figure correlations continuous vars, as images
+```{r}
+# only if genus
+if (params$tax_level == "genus"){
+format <- "png" # png # pdf
+
+fig_bedu_smi
+ggsave(glue("{fig_dir}/{params$markdown_id}_correlation_Beduinibacterium_Msmithii.{format}"),
+       plot = fig_bedu_smi,
+       bg = "white",
+       width = 4,
+       height = 4.5,
+       dpi = 400)
+}
+```
+
+## Figure correlations continuous vars, as plot rds
+```{r}
+# only if genus
+if (params$tax_level == "genus"){
+saveRDS(fig_bedu_smi,
+        glue("{rds_dir}/{params$markdown_id}_correlation_Beduinibacterium_Msmithii.rds"))
+}
+```
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

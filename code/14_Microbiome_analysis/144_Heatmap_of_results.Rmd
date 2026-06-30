@@ -1,0 +1,686 @@
+---
+title: "Microbiome comparison + correlation heatmaps"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "144_genus_counts_mixed" # can be: "144_genus_counts_mixed" or "144_asv_counts_mixed"
+  methane_group: "Methane_group"
+  
+  gc_res_filename: "142_genus_counts_ub_methane_group_tt_linear_models" 
+  # !! it assumes it is an .rds file in folder rds_dir
+  # can be:
+  # - "142_genus_counts_ub_methane_group_tt_linear_models" 
+  # - "142_asv_counts_ub_methane_group_tt_linear_models" 
+
+  
+  cor_res_filename: "143_genus_counts_mixed_ub_correlations_linear_models"
+  # !! it assumes it is an .rds file in folder rds_dir
+  # can be:
+  # - "143_genus_counts_mixed_ub_correlations_linear_models"
+  # - "143_asv_counts_mixed_ub_correlations_linear_models"
+
+  
+  tax_level: "genus" # can be: "ASV" or "genus"
+  is_gc_means: FALSE # should be FALSE
+  is_cor_means: FALSE # should be FALSE
+  
+  threshold_p: 0.05
+  threshold_fdr: 0.1
+  filter_unclassified: TRUE # can be true (recommended, for reproducibility) or false
+  
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(effsize)
+```
+
+## Study parameters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+# Read data
+## Results' data
+```{r}
+# group comparison
+gc_res_raw     <- readRDS(glue("{rds_dir}/{params$gc_res_filename}.rds"))
+
+# correlations
+cor_res_raw     <- readRDS(glue("{rds_dir}/{params$cor_res_filename}.rds"))
+```
+
+
+# Prepare data
+
+## Extract random effect
+```{r}
+if (params$is_gc_means){
+  
+  random_effect <- ""
+  random_effect_plus <- ""
+
+} else {
+  random_effect <- "(1|Subject_ID)"
+  random_effect_plus <- " + (1|Subject_ID)"
+}
+
+if (params$is_cor_means){
+  cor_label <- "Correlation (R)"
+  
+} else {
+  cor_label <- "Correlation\n(standardized β)"
+}
+
+gc_label <- "Group comparison\n(standardized β)"
+```
+
+## Identify whether to remove "unclassified" or not
+```{r}
+if (params$filter_unclassified){
+  if (params$tax_level == "genus"){
+    filter_unclassified_expr <- expr(!str_detect(response, "nclassified"))
+  } else if (params$tax_level =="ASV"){
+    filter_unclassified_expr <- expr(!str_detect(closest_tax, "nclassified"))
+  }
+  
+} else {
+  filter_unclassified_expr <- TRUE # do not filter anything
+}
+```
+
+
+
+## GC results
+```{r}
+gc_res <- gc_res_raw %>% 
+  # filter unclassified (if specified)
+  filter(eval(filter_unclassified_expr)) %>% 
+  # filter the adjustments we are interested in
+  filter(adjusted_by == random_effect |
+          adjusted_by == glue("WGTT{random_effect_plus}")
+         ) %>% 
+  # filter the responses with any (nominally or FDR) significant results
+  group_by(response) %>% 
+  mutate(is_signif_unadj = case_when(
+    params$tax_level == "genus" ~ any(adjusted_by == random_effect & p < params$threshold_p),
+    params$tax_level == "ASV" ~ any(adjusted_by == random_effect & FDR < params$threshold_fdr),
+    )) %>%
+  ungroup() %>%
+  filter(is_signif_unadj) %>%
+  select(-is_signif_unadj) %>% 
+  # assign a "significance label"
+  mutate(
+    significance_type = case_when(
+      FDR < params$threshold_fdr ~ "fdr",
+      p < params$threshold_p & FDR >= params$threshold_fdr ~ "nominal",
+      TRUE ~ "ns"
+    )
+  ) %>% 
+  # add an "adjustment"/fixed effect" label
+  mutate(adjustment_label = case_when(
+    str_detect(adjusted_by, "^\\(1\\|Subject_ID\\)$") ~ "Minimal adjustment",
+    str_detect(adjusted_by, "WGTT") ~ "Adjusted for WGTT",
+    adjusted_by == "" ~ "No adjustment",
+  ),
+  adjustment_label = factor(adjustment_label, levels = c(
+    "No adjustment",
+    "Minimal adjustment", 
+    "Adjusted for WGTT"
+  ))
+  ) %>% 
+  # add the taxa label
+  mutate(
+    tax_label = coalesce(
+      if (params$tax_level == "genus") response else NULL,
+      if (params$tax_level == "ASV") str_c(closest_tax, " (", response, ")") else NULL
+    )
+  ) %>% 
+  # trim very long taxa
+  mutate(
+    tax_label = if_else(
+      str_length(tax_label) > 40,          
+      str_c(word(tax_label, 1), " sp. (", response, ")"),                 
+      tax_label                            
+    )
+  )
+```
+
+## Correlation results
+```{r}
+cor_res <- cor_res_raw %>% 
+    # filter unclassified (if specified)
+  filter(eval(filter_unclassified_expr)) %>% 
+  # filter the significant responses from above
+  filter(response %in% gc_res$response) %>% 
+  # filter predictors of interest
+  filter(predictor %in% c("fasting_CH4", "fasting_H2",
+                          "archaea_inv_ct", "smithii_inv_ct")) %>% 
+  # filter adjustment of interest
+  filter(adjusted_by == "") %>% 
+   # assign a "significance label"
+  mutate(
+    significance_type = case_when(
+      FDR < params$threshold_fdr ~ "fdr",
+      p < params$threshold_p & FDR >= params$threshold_fdr ~ "nominal",
+      TRUE ~ "ns"
+    )
+  ) %>% 
+
+  # add an "adjustment"/fixed effect" label
+  mutate(predictor_label = case_when(
+  #  predictor == "stool_energy" ~ "Energy density",
+ #   predictor == "bacterial_load_wet" ~ "Microbial load",
+  #  predictor == "bacterial_load_dry" ~ "Microbial load (cell counts/g dry feces)",
+    predictor == "smithii_inv_ct" ~ "M. smithii",
+    predictor == "archaea_inv_ct" ~ "Archaea",
+    predictor == "fasting_CH4" ~ "Fasting breath methane",
+    predictor == "fasting_H2" ~ "Fasting breath hydrogen",
+ # predictor == "ph_proximal_colon" ~ "Proximal colonic pH",
+  ),
+  predictor_label = factor(
+    predictor_label, 
+    levels = c(
+       "Fasting breath methane",
+       "Fasting breath hydrogen",
+       "Archaea",
+       "M. smithii"
+    #   "Microbial load",
+      # "Microbial load (cell counts/g dry feces)",
+     #  "Energy density",
+    #  "Proximal colonic pH"
+  ))
+  ) %>% 
+  # add the taxa label
+  mutate(
+    tax_label = coalesce(
+      if (params$tax_level == "genus") response else NULL,
+      if (params$tax_level == "ASV") str_c(closest_tax, " (", response, ")") else NULL
+    )
+  ) %>% 
+  # trim very long taxa
+  mutate(
+    tax_label = if_else(
+      str_length(tax_label) > 40,          
+      str_c(word(tax_label, 1), " sp. (", response, ")"),                 
+      tax_label                            
+    )
+  )
+```
+
+
+## Heatmap aesthetics
+```{r}
+# color gradients
+gc_color_max_value <- gc_res %>% 
+  pull(estimate_std) %>%
+  abs() %>% max(na.rm = TRUE) %>% 
+  paulaR::ceiling_signif(digits = 0)
+
+gc_fill_scale <- scale_fill_gradient2(
+  low = study_colors$methane[[1]],
+  mid = "white",
+  high = study_colors$methane[[2]],
+  midpoint = 0,
+  limits = c(-gc_color_max_value, gc_color_max_value),
+  breaks = c(-gc_color_max_value, 0, gc_color_max_value),  
+  guide = guide_colorbar(title.position = "top"),
+  name = gc_label,
+ labels = c(
+    glue("{-gc_color_max_value}\nhigher\nin HMP"),
+    "0",
+    glue("{gc_color_max_value}\nhigher\nin LMP")
+  )
+)
+
+
+cor_color_max_value <- cor_res %>% 
+  pull(estimate_std) %>%
+  abs() %>% max(na.rm = TRUE) %>% 
+  paulaR::ceiling_signif(digits = 0)
+
+cor_fill_scale <- scale_fill_gradient2(
+  low = study_colors$correlation[[1]],
+  mid = study_colors$correlation[[2]],
+  high = study_colors$correlation[[3]],  
+    midpoint = 0,
+    limits = c(-cor_color_max_value, cor_color_max_value),
+    breaks = c(-cor_color_max_value, 0, cor_color_max_value),
+    guide = guide_colorbar(title.position = "top"),
+    name = cor_label
+  )
+
+fontsize <- 16
+fontsize_x <- ifelse(params$tax_level == "ASV", 6, 14)
+
+```
+
+## Clustering based on results
+```{r}
+cluster_matrix <- gc_res %>% 
+   select(tax_label,
+          x = adjustment_label,
+          estimate_std) %>%
+  # uncomment lines below to also use the corr results for clustering
+  bind_rows(cor_res %>% 
+              select(tax_label, 
+                     x = predictor,
+                     estimate_std)) %>% 
+  #############################
+  pivot_wider(
+    names_from = x,
+    values_from = estimate_std
+  ) %>% 
+  column_to_rownames("tax_label") %>% 
+  as.matrix()
+
+hc <- hclust(dist(cluster_matrix))
+row_order <- rownames(cluster_matrix)[hc$order]
+```
+
+
+# Heatmap of results
+
+## GC heatmap
+```{r}
+gc_hm <-
+gc_res %>% 
+  mutate(
+    tax_label = factor(tax_label, levels = row_order)
+  ) %>% 
+  ggplot(aes(x = tax_label,
+             y = adjustment_label)) +
+
+  # heatmap tiles
+  geom_tile(aes(fill = estimate_std), color = "grey20") +
+
+  # circles nominal P
+  geom_point(
+    data = gc_res %>% filter(significance_type == "nominal"),
+    aes(x = tax_label, 
+        y = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = NA,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  
+  # circles FDR
+  geom_point(
+    data = gc_res %>% filter(significance_type == "fdr"),
+    aes(x = tax_label, 
+        y = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = "black",                   
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+
+  # tile color scale
+  gc_fill_scale +
+
+  # shape scale
+  scale_shape_manual(
+    name = "",
+    values = c(nominal = 1, fdr = 21),
+    labels = c(nominal = "p < 0.05", fdr = "q < 0.1")
+  ) +
+
+  labs(y = "HMP vs LMP", 
+       x = NULL) +
+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  
+  paulaR::white_theme(font_size = fontsize) +
+  theme(
+    axis.text.x = element_text(angle = -45,
+                               hjust = 1,
+                               size = fontsize_x,
+                               color = "black"),
+    axis.title.y = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 6,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "left-rotated",  
+            halign = 0.5,       
+            valign = 0.5        
+          ),
+    axis.text.y = element_text(color = "black"),
+    legend.title = element_text(size = fontsize-4, face = "bold"),
+    legend.text = element_text(size = fontsize-4),
+    legend.position = "bottom",
+    legend.location = "horizontal",
+    panel.grid = element_blank()
+  )
+
+gc_hm
+
+```
+
+## Cor heatmap
+```{r}
+cor_hm <- 
+cor_res %>% 
+  mutate(
+    tax_label = factor(tax_label, levels = row_order)
+  ) %>% 
+  ggplot(aes(x = tax_label, y = predictor_label)) +
+  
+  # heatmap tiles
+  geom_tile(aes(fill = estimate_std), color = "grey20") +
+  
+  # circles nominal P
+  geom_point(
+    data = cor_res %>% filter(significance_type == "nominal"),
+    aes(x = tax_label, 
+        y = predictor_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = NA,
+    inherit.aes = FALSE
+  ) +
+  # circles FDR
+  geom_point(
+    data = cor_res %>% filter(significance_type == "fdr"),
+    aes(x = tax_label, 
+        y = predictor_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = "black",                   
+    inherit.aes = FALSE
+  ) +
+
+  # tile color scale
+  cor_fill_scale +
+  
+    # shape scale
+  scale_shape_manual(
+    name = "",
+    values = c(nominal = 1, fdr = 21),
+    labels = c(nominal = "p < 0.05", fdr = "q < 0.1")
+  ) +
+  
+guides(
+  fill = guide_colourbar(order = 1,  title.position = "top"),
+  shape = guide_legend(order = 2)
+) +
+
+
+
+  labs(
+    y = "Correlation",
+    x = NULL,
+  ) +
+  
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  
+  paulaR::white_theme(font_size = fontsize) +
+  theme(
+    axis.text.x = element_text(angle = -45,
+                               hjust = 1,
+                               size = fontsize_x,
+                               color = "black"),
+    axis.text.y = element_text(color = "black"),
+    axis.title.y = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 6,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "left-rotated",  
+            halign = 0.5,       
+            valign = 0.5        
+          ),
+    legend.title = element_text(size = fontsize - 4, face = "bold"),
+    legend.text = element_text(size = fontsize-4),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "horizontal",
+    legend.location = "horizontal",
+    panel.grid = element_blank()
+  )
+
+cor_hm
+```
+
+## Join both plots
+```{r}
+joint_hm <- wrap_plots(list(gc_hm, cor_hm), nrow = 2) +
+  plot_layout(
+    guides = "collect", 
+    axes = "collect_x",
+    heights = c(2/10, 4/10)
+    ) &
+  theme(
+    legend.position = "bottom",    
+    legend.direction = "horizontal",
+    legend.title.align = 0.5
+    )
+
+joint_hm
+```
+
+## A version for the ASV in vertical
+```{r}
+if (params$tax_level == "ASV"){
+  
+  gc_hm_v <- gc_hm + 
+    scale_y_discrete(position = "right") +
+    scale_x_discrete(limits = rev) +
+    labs(
+      title = "HMP vs LMP",
+      y = NULL,
+      x = NULL
+    ) +
+    guides(guide = guide_colorbar(
+      title.position = "top")) +
+    coord_flip() +
+    theme(
+      plot.title = ggtext::element_textbox_simple(
+        fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 6,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "upright",  
+            halign = 0.5,       
+            valign = 0.5 
+      ),
+      axis.text.y = element_text(
+        size = fontsize - 6,
+        angle = 0,
+        color = "black"),
+      
+      axis.text.x = element_text(
+        angle = -90,
+        size = fontsize_x,
+        color = "black"
+      ),
+    legend.position = "right",
+    legend.direction = "horizontal"
+    )
+  
+  gc_hm_v
+  
+  cor_hm_v <- cor_hm + 
+    scale_y_discrete(position = "right") +
+    scale_x_discrete(limits = rev) +
+    labs(
+      title = "Correlation",
+      y = NULL,
+      x = NULL
+    ) +
+    guides(guide = guide_colorbar(
+      title.position = "top"),
+      shape = guide_legend(
+        ncol = 1
+        ),
+      fill = guide_colorbar(
+        direction = "horizontal",
+        title.position = "top",
+        barwidth = unit(3, "cm"),
+        barheight = unit(0.4, "cm")
+      ),
+    ) +
+    coord_flip() +
+    theme(
+      plot.title = ggtext::element_textbox_simple(
+        fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 6,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "upright",  
+            halign = 0.5,       
+            valign = 0.5 
+      ),
+      axis.text.y = element_text(
+        size = fontsize - 6,
+        angle = 0,
+        color = "black"),
+      
+      axis.text.x = element_text(
+        angle = -90,
+        size = fontsize_x,
+        color = "black"
+      ),
+    legend.position = "right",
+    legend.box = "vertical",
+    )
+  
+  cor_hm_v
+  
+  joint_hm_v <-
+    wrap_plots(
+    list(gc_hm_v, cor_hm_v), ncol = 2) +
+  plot_layout(
+    guides = "collect", 
+    axes = "collect_y",
+    widths = c(2/10, 4/10)
+    ) &
+  theme(
+    legend.position = "bottom", 
+    legend.direction = "horizontal",
+    legend.title.align = 0.5,
+     legend.box.margin =  margin(l = -200)
+    )
+
+joint_hm_v
+}
+```
+
+
+# Save results
+```{r}
+if (params$tax_level == "genus"){
+  width <- 10
+  height <- 6
+} else if (params$tax_level == "ASV"){
+  width <- 19
+  height <- 7
+}
+
+
+format <- "png"
+
+joint_hm 
+ggsave(glue("{fig_dir}/{params$markdown_id}_microbiome_comparison_heatmap.{format}"),
+       bg = "white",
+       width = width,
+       height = height,
+       dpi = 400
+       )
+
+saveRDS(joint_hm,
+        glue("{rds_dir}/{params$markdown_id}_microbiome_comparison_heatmap.rds"))
+
+# the vertical heatmap if ASV
+if (params$tax_level == "ASV"){
+  
+  joint_hm_v 
+ggsave(glue("{fig_dir}/{params$markdown_id}_microbiome_comparison_heatmap_vertical.{format}"),
+       bg = "white",
+       width = 6,
+       height = 14,
+       dpi = 400
+       )
+
+saveRDS(joint_hm_v,
+        glue("{rds_dir}/{params$markdown_id}_microbiome_comparison_heatmap_vertical.rds"))
+  
+}
+```
+
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

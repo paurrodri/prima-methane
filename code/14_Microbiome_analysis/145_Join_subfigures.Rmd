@@ -1,0 +1,117 @@
+---
+title: "Join interesting figures from microbiome analyses"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "145"
+  methane_group: "Methane_group"
+
+
+---
+
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(ggtext)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(effsize)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+# Read plots
+```{r}
+richness_raw <- readRDS(glue("{rds_dir}/141_boxplot_richness.rds"))
+shannon_raw <- readRDS(glue("{rds_dir}/141_boxplot_shannon.rds"))
+pcoa_raw <- readRDS(glue("{rds_dir}/141_microbiome_pcoa.rds"))
+hm_raw <- readRDS(glue("{rds_dir}/144_genus_counts_mixed_microbiome_comparison_heatmap.rds"))
+```
+
+# Clean/prepare plots
+```{r}
+richness <- richness_raw
+shannon <- shannon_raw
+pcoa <- pcoa_raw +
+  theme(axis.title = element_text(size = 14))
+hm <- hm_raw
+```
+
+
+# Combine plots
+```{r}
+panel_1 <- 
+  pcoa + richness + shannon +
+  plot_layout(widths = c(3,2,2)) +
+  plot_annotation(tag_levels = "A")
+
+panel_2 <- hm + plot_annotation(tag_levels = list(c("D")))
+```
+
+
+# Save results
+```{r}
+format <- "png" # png # pdf
+
+panel_1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_3_panel_1.{format}"),
+       bg = "white",
+       width = 10,
+       height = 4,
+       dpi = 300)
+
+panel_2
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_3_panel_2.{format}"),
+       bg = "white",
+       width = 10,
+       height = 6,
+       dpi = 300)
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
