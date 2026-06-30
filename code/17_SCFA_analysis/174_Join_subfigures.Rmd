@@ -1,0 +1,166 @@
+---
+title: "Join interesting figures from microbiome analyses"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "174"
+  methane_group: "Methane_group"
+
+
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(effsize)
+library(ggtext)
+library(broom)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+loadings_factor <- 10
+```
+
+
+# Read plots
+```{r}
+pca_raw <- readRDS(glue("{rds_dir}/171_dry_long_fecal_SCFA_PCA.rds"))
+
+f_but_bp_raw <- readRDS(glue("{rds_dir}/171_dry_long_fecal_butyrate_boxplot.rds"))
+
+f_prop_bp_raw <- readRDS(glue("{rds_dir}/171_dry_long_fecal_propionate_boxplot.rds"))
+
+f_but_ph_raw <- readRDS(glue("{rds_dir}/171_dry_long_fecal_butyrate_ph_distal_colon.rds"))
+
+p_but_ph_raw <- readRDS(glue("{rds_dir}/171_dry_long_plasma_butyrate_ph_proximal_colon.rds"))
+
+
+hm_raw <- readRDS(glue("{rds_dir}/171_dry_long_plasma_fecal_SCFA_GC_corr_heatmap.rds"))
+
+```
+
+# Clean/prepare plots
+```{r}
+pca <- pca_raw
+f_but_bp  <- f_but_bp_raw +
+  labs(y = "Faecal butyrate\n(μmol/g dry faeces)")
+f_prop_bp <- f_prop_bp_raw +
+  labs(y = "Faecal propionate\n(μmol/g dry faeces)")
+
+f_but_ph <- f_but_ph_raw
+f_but_ph$layers[[1]]$aes_params$size <- 2
+f_but_ph  <- f_but_ph +
+  labs(y = "Mean faecal butyrate\n(μmol/g dry faeces)")
+
+p_but_ph  <- p_but_ph_raw
+p_but_ph$layers[[1]]$aes_params$size <- 2
+p_but_ph  <- p_but_ph +
+  labs(y = "Mean plasma butyrate\n(μmol/mL)")
+
+hm        <- hm_raw
+```
+
+
+# Combine plots
+```{r}
+panel_1 <-
+pca + plot_annotation(tag_levels = "A") # note that further editing in pptx is necessary
+
+panel_2 <-
+  hm +
+  plot_annotation(title = "D") &
+  theme(
+    plot.title = element_text(hjust = 0, 
+                              size = 18,
+                              face = "bold")
+  )
+
+panel_3 <- 
+  f_but_bp + f_prop_bp + plot_layout(nrow = 2) +
+  plot_annotation(tag_levels = list(c("B", "C")))
+
+panel_4 <- p_but_ph + f_but_ph +
+  plot_layout(ncol = 2) +
+  plot_annotation(tag_levels = list(c("E", "F")))
+```
+
+
+# Save results
+```{r}
+format <- "png" # png # pdf
+
+panel_1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_4_panel_1.{format}"),
+       bg = "white",
+       width = 8,
+       height = 6,
+       dpi = 400)
+
+panel_2
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_4_panel_2.{format}"),
+       bg = "white",
+       width = 8,
+       height = 6.5,
+       dpi = 400)
+
+panel_3
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_4_panel_3.{format}"),
+       bg = "white",
+       width = 3,
+       height = 6,
+       dpi = 400)
+
+panel_4
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_4_panel_4.{format}"),
+       bg = "white",
+       width = 7.5,
+       height = 4,
+       dpi = 400)
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
