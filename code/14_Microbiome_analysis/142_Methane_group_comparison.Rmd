@@ -35,7 +35,6 @@ library(tibble)
 library(dplyr)
 library(magrittr)
 library(tidyr)
-library(readxl)
 library(glue)
 library(purrr)
 library(patchwork)
@@ -44,9 +43,6 @@ library(stringr)
 library(ggpubr)
 library(openxlsx)
 library(flextable)
-library(phyloseq)
-library(vegan)
-library(effsize)
 ```
 
 ## Study parameters

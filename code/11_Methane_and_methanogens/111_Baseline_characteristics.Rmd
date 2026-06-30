@@ -27,7 +27,6 @@ library(tidyverse)
 library(glue)
 library(gt)
 library(gtsummary)
-library(magrittr)
 library(openxlsx)
 ```
 

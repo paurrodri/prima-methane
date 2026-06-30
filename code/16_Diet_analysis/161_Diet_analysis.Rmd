@@ -28,11 +28,8 @@ knitr::opts_chunk$set(warning = FALSE, message = FALSE,
 ```{r}
 library(tidyverse)
 library(glue)
-library(magrittr)
 library(openxlsx)
 library(ggpubr)
-library(ggplot2)
-library(broom.mixed)
 library(patchwork)
 ```
 

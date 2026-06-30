@@ -1,5 +1,5 @@
 ---
-title: "Join interesting figures from microbiome analyses"
+title: "Join interesting figures from SCFA analyses"
 author: "Paula Rodriguez-Garcia"
 date: "`r Sys.time()`"
 output:
@@ -22,20 +22,9 @@ knitr::opts_chunk$set(warning = FALSE, message = FALSE,
 
 ## Libraries
 ```{r}
-library(tibble)
-library(dplyr)
-library(magrittr)
-library(tidyr)
-library(readxl)
 library(glue)
-library(purrr)
 library(patchwork)
 library(ggplot2)
-library(stringr)
-library(ggpubr)
-library(openxlsx)
-library(flextable)
-library(effsize)
 library(ggtext)
 library(broom)
 ```

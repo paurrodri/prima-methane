@@ -23,21 +23,10 @@ knitr::opts_chunk$set(warning = FALSE, message = FALSE,
 
 ## Libraries
 ```{r}
-library(tibble)
 library(ggtext)
-library(dplyr)
-library(magrittr)
-library(tidyr)
-library(readxl)
 library(glue)
-library(purrr)
 library(patchwork)
 library(ggplot2)
-library(stringr)
-library(ggpubr)
-library(openxlsx)
-library(flextable)
-library(effsize)
 ```
 
 ## Study paramters
