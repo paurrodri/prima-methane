@@ -1,0 +1,207 @@
+---
+title: "Join interesting figures from diet analyses"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "163"
+  methane_group: "Methane_group"
+
+
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(effsize)
+library(broom.mixed)
+library(ggtext)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+# Read plots
+```{r}
+kcal_raw <- readRDS(glue("{rds_dir}/161_energy_intake_boxplot_means.rds"))
+macronut_raw <- readRDS(glue("{rds_dir}/161_macronutrients_boxplots_means.rds"))
+fibre_raw <- readRDS(glue("{rds_dir}/161_fibre_related_boxplots_means.rds"))
+
+
+# fur supplementary
+fem_kcal_raw <- readRDS(glue("{rds_dir}/161_female_energy_intake_boxplot_means.rds"))
+fem_macronut_raw <- readRDS(glue("{rds_dir}/161_female_macronutrients_boxplots_means.rds"))
+```
+
+# Clean/prepare plots
+```{r}
+kcal <- kcal_raw + theme(plot.title = element_blank())
+macronut <- macronut_raw
+fibre <- fibre_raw
+
+
+fem_kcal <- fem_kcal_raw + theme(plot.title = element_blank())
+fem_macronut <- fem_macronut_raw
+```
+
+
+# Combine plots
+```{r}
+panel_1 <- 
+  kcal +
+  plot_annotation(tag_levels = "A",
+                  subtitle = "Total energy intake",
+                  theme = theme(
+                    plot.subtitle = element_text(face = "bold",
+                                                 size = 14,
+                                                 vjust = -1, 
+                                                 hjust = 0.45)
+                  )) &
+  theme(
+    plot.tag.position = c(0, 1.2),
+    plot.margin = margin(25,5,5,5) 
+  )
+
+panel_2 <-
+  macronut +
+  plot_annotation(tag_levels = list(c("B")),
+                  subtitle = "Macronutrients",
+                  theme = theme(
+                    plot.subtitle = element_text(face = "bold",
+                                                 size = 14,
+                                                 vjust = -1, 
+                                                 hjust = 0.1)
+                    )) &
+   theme(
+     plot.tag.position = c(0, 1.2),
+     plot.margin = margin(25,5,5,5) 
+   )
+
+panel_3 <- 
+fibre +
+  plot_annotation(tag_levels = list(c("C")),
+                  subtitle = "Fibre-related food groups",
+                  theme = theme(
+                    plot.subtitle = element_text(face = "bold",
+                                                 size = 14,
+                                                 vjust = -1,
+                                                 hjust = 0.1)
+                  )) &
+  theme(
+    plot.tag.position = c(0, 1.2),
+    plot.margin = margin(25, 10,5,5)
+  )
+
+
+
+## supplementary figure 9
+sup_9_panel_1 <- (fem_kcal + plot_annotation(tag_levels = "A",
+                  subtitle = "Total energy intake",
+                  theme = theme(
+                    plot.subtitle = element_text(face = "bold",
+                                                 size = 14,
+                                                 vjust = -1, 
+                                                 hjust = 0.45)
+                  ))) 
+
+sup_9_panel_2 <- fem_macronut +
+  plot_annotation(tag_levels = list(c("B")),
+                  subtitle = "Macronutrients",
+                  theme = theme(
+                    plot.subtitle = element_text(face = "bold",
+                                                 size = 14,
+                                                 vjust = -1, 
+                                                 hjust = 0.1)
+                    )) 
+```
+
+
+# Save results
+```{r}
+format <- "png" # png # pdf
+
+panel_1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_5_panel_1.{format}"),
+       bg = "white",
+       width = 2.5,
+       height = 4,
+       dpi = 400)
+
+panel_2
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_5_panel_2.{format}"),
+       bg = "white",
+       width = 7,
+       height = 4,
+       dpi = 400)
+
+panel_3
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_5_panel_3.{format}"),
+       bg = "white",
+       width = 9.5,
+       height = 4,
+       dpi = 400)
+
+
+# for supplementary
+
+sup_9_panel_1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Sup_Figure_9_panel_1.{format}"),
+       bg = "white",
+       width = 2.5,
+       height = 4,
+       dpi = 400)
+
+sup_9_panel_2
+ggsave(glue("{fig_dir}/{params$markdown_id}_Sup_Figure_9_panel_2.{format}"),
+       bg = "white",
+       width = 7,
+       height = 4,
+       dpi = 400)
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
