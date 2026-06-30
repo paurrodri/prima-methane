@@ -1,0 +1,525 @@
+---
+title: "Gut environment boxplots"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "120" # "120_MTT2" means methane TT 2group
+  methane_group: "Methane_group" # "Methane_TT_2group"
+  
+  cor_method_means: "spearman"
+  stool_ph_var: "stool_ph_raw" 
+---
+
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+count_how_many_zero_per_column <- function (data){
+    sapply(data, function(x) sum(x == 0, na.rm = T))
+}
+```
+
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_all_filename)
+meta_means_raw <- readRDS(meta_means_filename)
+```
+
+
+# Prepare data
+
+## Extract variables of interest
+```{r}
+gut_boxplots_vars <- c(
+  "bloating", "constipation", "git_symptoms",
+  "stool_freq", "bristol_scale", "bacterial_load_wet",
+  params$stool_ph_var, "stool_energy", "stool_moisture", "cn_ratio")
+
+gut_boxplots_varnames <- list("Bloating", "Constipation", "GIT symptoms",
+                   "Stool frequency", "Stool consistency", "Bacterial load",
+                   "Stool pH", "Energy density", "Stool moisture" ,"C:N ratio")
+
+gut_boxplots_var_mapping <- gut_boxplots_varnames
+names(gut_boxplots_var_mapping) <- gut_boxplots_vars
+
+meta <- meta_raw %>% 
+  select(Sample_ID, Subject_ID,
+         !!sym(params$methane_group),
+         all_of(gut_boxplots_vars)) %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+meta_means <- meta_means_raw %>% 
+  select(Subject_ID,
+         !!sym(params$methane_group),
+         all_of(gut_boxplots_vars)) %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+```
+
+
+# Set plot aesthetics
+## Fontsize
+```{r}
+fontsize <- 14
+```
+
+## Y axis labels
+```{r}
+gut_boxplots_ylab_mapping <- list("Visual analog scale",
+                       "Visual analog scale",
+                       "Visual analog scale",
+                       "Times per day",
+                       "Bristol stool score",
+                       "Cell counts/g wet feces",
+                       "pH",
+                       "J/g dry feces",
+                       "Water content (%)",
+                       "Carbon-to-nitrogen ratio"
+                       )
+
+names(gut_boxplots_ylab_mapping) <- gut_boxplots_vars
+```
+
+## Y axis aesthetics
+```{r}
+gut_boxplots_means_ylim1_mapping <- list(-1,
+                       -1,
+                       -1,
+                       0,
+                       1, # bss
+                       2e10, #1e11,
+                       6,
+                       19000,
+                       0.5, 
+                       5)
+
+names(gut_boxplots_means_ylim1_mapping) <- gut_boxplots_vars
+
+gut_boxplots_means_ylim2_mapping <- c(6,
+                       6,
+                       6,
+                       4,
+                       7, # bss
+                       2e11, #5e11,
+                       7.5,
+                       28000,
+                       1, 
+                       20)
+
+names(gut_boxplots_means_ylim2_mapping) <- gut_boxplots_vars
+
+
+gut_boxplots_means_break1_mapping <- list(0,
+                       0,
+                       0,
+                       0,
+                       1, # bss
+                       2e10, #1e11,
+                       6,
+                       2000,
+                       0.5,
+                       5)
+
+names(gut_boxplots_means_break1_mapping) <- gut_boxplots_vars
+
+gut_boxplots_means_break2_mapping <- list(6,
+                       6,
+                       6,
+                       4,
+                       7, # bss
+                      2e11, #  5e11,
+                       7.5,
+                       28000,
+                       1,
+                       20)
+
+names(gut_boxplots_means_break2_mapping) <- gut_boxplots_vars
+
+
+gut_boxplots_means_break3_mapping <- list(2,
+                       2,
+                       2,
+                       1,
+                       1, # bss
+                      5e10, # 1e11,
+                       0.5,
+                       2000,
+                       0.1, 
+                       5)
+
+names(gut_boxplots_means_break3_mapping) <- gut_boxplots_vars
+
+
+gut_boxplots_ylim1_mapping <- list(-1,
+                       -1,
+                       -1,
+                       0,
+                       1, # bss
+                      8e9, # 4e10,
+                       4.5,
+                       8000,
+                       0.2, 
+                       5)
+
+names(gut_boxplots_ylim1_mapping) <- gut_boxplots_vars
+
+gut_boxplots_ylim2_mapping <- c(10,
+                       10,
+                       10,
+                       5,
+                       7, # bss
+                       4e11, # 1e12,
+                       8.5,
+                       28500,
+                       1, 
+                       20)
+
+names(gut_boxplots_ylim2_mapping) <- gut_boxplots_vars
+
+
+
+gut_boxplots_break1_mapping <- list(0,
+                       0,
+                       0,
+                       0,
+                       1, # bss
+                       8e9, #4e10,
+                       6,
+                       2000,
+                       0.5,
+                       5)
+
+names(gut_boxplots_break1_mapping) <- gut_boxplots_vars
+
+gut_boxplots_break2_mapping <- list(6,
+                       6,
+                       6,
+                       4,
+                       7, # bss
+                      4e11,# 1e12,
+                       7.5,
+                       28000,
+                       1,
+                       20)
+
+names(gut_boxplots_break2_mapping) <- gut_boxplots_vars
+
+
+gut_boxplots_break3_mapping <- list(2,
+                       2,
+                       2,
+                       1,
+                       1, # bss
+                       5e10, # 2e11,
+                       0.5,
+                       2000,
+                       0.1, 
+                       5)
+
+names(gut_boxplots_break3_mapping) <- gut_boxplots_vars
+
+
+gut_boxplots_yperc_mapping <- list(waiver(),
+                       waiver(),
+                       waiver(),
+                       waiver(),
+                       waiver(), # bss
+                       scientific_notation_fun,
+                       waiver(),
+                       scientific_notation_fun,
+                       function(x) scales::percent(x, suffix = ""),
+                       waiver())
+
+names(gut_boxplots_yperc_mapping) <- gut_boxplots_vars
+
+```
+
+# Plot data
+## Energy boxplot (means)
+```{r}
+x <- params$methane_group
+y <- "stool_energy"
+ylim <- c(19000, 28000)
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.9)
+breaks <- seq(2e4, 2.8e4, 2e3)
+
+f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "`"))
+model <- lm(f, meta_means)
+pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+test <- tibble(
+  .y. = y,
+  group1 = "HMP",
+  group2 = "LMP",
+  p = pval
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = ppos
+  )
+
+fig_energy <- 
+  meta_means %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.3) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = gut_boxplots_var_mapping[[y]],
+          y = gut_boxplots_ylab_mapping[[y]],
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       labels = gut_boxplots_yperc_mapping[[y]],
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_energy
+```
+
+## Microbial load boxplot (longitudinal)
+```{r}
+x <- params$methane_group
+y <- "bacterial_load_wet"
+ylim <- c(8.6e9, 2.5e11)
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(5e10, 2.5e11, 5e10)
+
+f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "`+ (1|Subject_ID)"))
+
+model <- lmerTest::lmer(f, data = meta)
+pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+
+
+test <- tibble(
+  .y. = y,
+  group1 = "LMP",
+  group2 = "HMP",
+  p = pval,
+  y.position = ppos,
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+  ))
+
+fig_load_long <- 
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.1) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = gut_boxplots_var_mapping[[y]],
+          y = gut_boxplots_ylab_mapping[[y]],
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       labels = gut_boxplots_yperc_mapping[[y]],
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_load_long
+```
+
+## Correlation energy and microbial load (means)
+```{r}
+x <- "stool_energy"
+y <- "bacterial_load_wet"
+
+xlim <- c(paulaR::trunc_signif(min(meta_means[[x]], na.rm = F), 3),
+          paulaR::ceiling_signif(max(meta_means[[x]], na.rm = T), 3))
+ylim <- c(paulaR::trunc_signif(min(meta_means[[y]], na.rm = F), 10),
+          paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 10))
+
+test <- meta_means %>%
+  summarise(
+    r = cor(!!sym(x), !!sym(y), method = params$cor_method_means),
+    p = cor.test(!!sym(x), !!sym(y), method = params$cor_method_means, exact = FALSE)$p.value
+  ) %>%
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("R = {round(r, 3)}"),
+    label = glue("{r_lab}, {p_lab}"),
+    y_pos = max(meta_means[[y]], na.rm = TRUE) * 0.95,
+    x_pos = min(meta_means[[x]], na.rm = TRUE) * 1.08
+   )
+
+fig_energy_load_means <-
+  meta_means %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+              x = test$x_pos,
+              y = test$y_pos,
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0.5) +
+    scale_x_continuous(limits = xlim,
+                       breaks = seq(xlim[1], xlim[2], 2e3),
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = seq(ylim[1], ylim[2], 2e10),
+                       labels = scientific_notation_fun
+                       ) +
+    labs(title = "",
+         y = "Bacterial load\n(cell counts/g wet feces)",
+         x = "Energy density\n(J/g dry feces)",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom",
+          plot.margin = margin(5,5,5,5),
+          axis.text.x = element_text(angle = 30, hjust = 1))
+
+fig_energy_load_means
+```
+
+
+
+# Save results
+
+## Boxplot energy and methane groups (means)
+```{r}
+format <- "png" # png # pdf
+fig_energy
+ggsave(glue("{fig_dir}/{params$markdown_id}_Energy_boxplot_means.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+
+saveRDS(fig_energy, glue("{rds_dir}/{params$markdown_id}_Energy_boxplot_means.rds"))
+```
+
+
+## Boxplot microbial load and methane groups (longitudinal)
+```{r}
+format <- "png" # png # pdf
+fig_load_long
+ggsave(glue("{fig_dir}/{params$markdown_id}_Bacterial_load_boxplot_longitudinal.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+
+saveRDS(fig_load_long, glue("{rds_dir}/{params$markdown_id}_Bacterial_load_boxplot_longitudinal.rds"))
+```
+
+
+## Correlation energy and microbial load (means)
+```{r}
+format <- "png" # png # pdf
+fig_energy_load_means
+ggsave(glue("{fig_dir}/{params$markdown_id}_Correlation_energy_bacterial_load_means.{format}"),
+       bg = "white",
+       width = 5,
+       height = 4,
+       dpi = 300)
+
+saveRDS(fig_energy_load_means, glue("{rds_dir}/{params$markdown_id}_Correlation_energy_bacterial_load_means.rds"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

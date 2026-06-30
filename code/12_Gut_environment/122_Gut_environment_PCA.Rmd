@@ -1,0 +1,418 @@
+---
+title: "PCA gut environment"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "122"
+  methane_group: "Methane_group"
+  stool_ph_var: "stool_ph_raw"
+---
+
+NOTES: 
+- This markdown only uses the means' data, as for some variables, there are only 2 repeated measures, which would lead to a lot of NAs and therefore loss of information.
+
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(ggrepel)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+count_how_many_zero_per_column <- function (data){
+    sapply(data, function(x) sum(x == 0, na.rm = T))
+}
+
+get_rows_with_all_na <- function(data, vars) {
+  data %>%
+    dplyr::filter(dplyr::if_all(all_of(vars),
+                                is.na))
+}
+
+scientific_notation_fun <- function(x) {
+  parse(text = gsub(
+    "e\\+?", "%*%10^",
+    formatC(x, format = "e", digits = 1)
+  ))
+}
+```
+
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_means_filename)
+```
+
+
+# Prepare data
+
+## Check variables of interest
+```{r}
+pca_vars <- c(
+  "bloating",
+  "constipation",
+  "git_symptoms",
+  
+  "stool_freq",
+  "bristol_scale",
+  "stool_moisture",
+  params$stool_ph_var,
+  "stool_energy",
+  "bacterial_load_wet",
+  
+  "ph_duodenum",
+  "ph_small_bowel",
+  "ph_proximal_colon",
+  "ph_distal_colon",
+  "ph_sigmoid_colon",
+  "ph_rectum",
+  
+  
+  "SBTT",
+  "CTT",
+  #"WGTT" # not included because of the subjects with no WGTT data
+  
+  "fasting_H2",
+  "archaea_inv_ct"
+  #"smithii_inv_ct" # not included because of 31 subjects with non-detected smithii
+  )
+
+pca_varnames <- c(
+  
+  "Bloating",
+  "Constipation",
+  "GIT symptoms",
+  
+  "Stool frequency",
+  "Stool consistency",
+  "Stool moisture",
+  "Stool pH", 
+  "Microbial load",
+  "Energy density",
+  
+  "Duodenal pH",
+  "Small intestinal pH",
+  "Proximal colonic pH",
+  "Distal colonic pH",
+  "Sigmoid colonic pH",
+  "Rectal pH",
+  
+  "Small int. transit time",
+  "Colonic transit time",
+  #"Whole-gut transit time",
+  
+  "Breath hydrogen",
+  "Archaea"
+  #"M. smithii"
+)
+
+
+pca_vars_mapping <- pca_varnames
+names(pca_vars_mapping) <- pca_vars
+
+
+meta_raw %>%
+  select(Subject_ID, params$methane_group, all_of(pca_vars)) %>%
+  paulaR::count_how_many_na_per_column()
+   
+      
+meta <- meta_raw %>% 
+  select(Subject_ID, params$methane_group, all_of(pca_vars)) %>% 
+  na.omit() 
+```
+
+# PCA
+## Settings
+```{r}
+top_k <- 10
+fontsize <- 14
+loadings_factor <- 10
+
+loadings_offset_y_pos <- 0.01
+loadings_offset_y_neg <- -0.01
+
+loadings_offset_x_pos <- 0.01
+loadings_offset_x_neg <- -0.01
+```
+
+## Compute PCA
+```{r}
+pca <- prcomp(meta %>%
+                select(-Subject_ID, -!!sym(params$methane_group)),
+              scale = T)
+
+scores <- meta %>% 
+  select(Subject_ID, params$methane_group) %>% 
+  bind_cols(data.frame(pca$x[ , 1:top_k]))
+
+loadings <- pca$rotation[ , 1:top_k] %>% 
+  as_tibble(rownames = "var") %>% 
+  mutate(varname = pca_vars_mapping[var], .after = "var") %>% 
+  mutate(
+    y_offset = ifelse(PC2 > 0, loadings_offset_y_pos, loadings_offset_y_neg),
+    x_offset = ifelse(PC1 > 0, loadings_offset_x_pos, loadings_offset_x_neg),
+    label_x = PC1*loadings_factor + x_offset,
+    label_y = PC2*loadings_factor + y_offset
+  )
+
+labels <- loadings$varname
+
+importances <- summary(pca)
+```
+
+## Scores plot
+```{r}
+scores_plot <- 
+  scores %>% 
+  ggplot() + 
+  geom_point(aes(PC1,
+                 PC2,
+                 color = !!sym(params$methane_group),
+                 fill = !!sym(params$methane_group)
+                 ),
+             shape = 21, alpha = 0.5, size = 3) +
+  geom_hline(yintercept = 0,
+             color = "gray80",
+             linetype = "dashed") +
+  geom_vline(xintercept = 0,
+             color = "gray80",
+             linetype = "dashed")  +
+  stat_ellipse(data = scores, 
+               aes(x = PC1, y = PC2, fill = !!sym(params$methane_group)),
+               geom = "polygon",
+               alpha = 0.2) +
+  scale_fill_manual(values = study_colors$methane) +
+  scale_color_manual(values = study_colors$methane) +
+  labs(x = glue("PC1 ({as.character(signif(importances$importance[2,1]*100, 3))}%)"),
+       y = glue("PC2 ({as.character(signif(importances$importance[2,2]*100, 3))}%)")) +
+  
+  geom_segment(data = loadings %>% select(-var, -varname),
+               aes(x = 0,
+                   y = 0,
+                   xend = PC1*loadings_factor,
+                   yend = PC2*loadings_factor),
+             color = "black",
+             arrow = arrow(angle = 25, 
+                           length = unit(4, "pt"))
+             ) +
+  geom_text_repel(data = loadings %>% select(-var, -varname),
+                  aes(x = label_x,
+                      y = label_y,
+                      label = labels),
+            segment.color = "gray30",
+            size = fontsize/3,
+            vjust = 1,
+            hjust = 1,
+            max.overlaps = Inf,
+            segment.linetype = "dashed"
+            ) +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = "none")
+
+scores_plot
+```
+
+## PC1 boxplot
+```{r}
+ylim <- c(paulaR::ceiling_signif(min(scores$PC1), 0),
+          paulaR::ceiling_signif(max(scores$PC1), 0))
+
+breaks <- seq(ylim[1], ylim[2], 2)
+
+test <- compare_means(as.formula(paste("PC1 ~", params$methane_group)),
+                      scores,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = max(scores$PC1)*1.05)
+
+boxplot_pc1 <- 
+  scores %>% 
+  ggplot(aes(x = !!sym(params$methane_group),
+             y = PC1,
+             group = !!sym(params$methane_group))) +
+  geom_boxplot(aes(fill = !!sym(params$methane_group)),
+               alpha = 0.5, 
+               outlier.shape = NA) +
+  geom_jitter(aes(fill = !!sym(params$methane_group),
+                  color = !!sym(params$methane_group)),
+              shape = 21,
+              alpha = 0.5,
+              height = 0,
+              size = 3)+
+  scale_fill_manual(values = study_colors$methane) +
+  scale_color_manual(values = study_colors$methane) +
+  guides(color = "none") +
+  stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  scale_y_continuous(limits = ylim, 
+                       breaks = breaks) + 
+  coord_flip() +
+  labs(x = "",
+       y = glue("PC1 ({as.character(signif(importances$importance[2,1]*100, 3))}%)"),
+       fill = "") +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = c(0.98, 0.999),
+        legend.justification = c("right", "top"),
+        legend.title = element_blank(),
+        legend.background = element_rect(fill = "white"))
+
+boxplot_pc1
+```
+
+
+## PC2 boxplot (not saved)
+```{r}
+ylim <- c(paulaR::ceiling_signif(min(scores$PC2), 0),
+          paulaR::ceiling_signif(max(scores$PC2), 0))
+
+breaks <- seq(ylim[1], ylim[2], 2)
+
+test <- compare_means(as.formula(paste("PC2 ~", params$methane_group)),
+                      scores,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = max(scores$PC1)*1.05)
+
+boxplot_pc2 <- 
+  scores %>% 
+  ggplot(aes(x = !!sym(params$methane_group),
+             y = PC2,
+             group = !!sym(params$methane_group))) +
+  geom_boxplot(aes(fill = !!sym(params$methane_group)),
+               alpha = 0.5, 
+               outlier.shape = NA) +
+  geom_jitter(aes(fill = !!sym(params$methane_group),
+                  color = !!sym(params$methane_group)),
+              shape = 21,
+              alpha = 0.5,
+              height = 0,
+              size = 3)+
+  scale_fill_manual(values = study_colors$methane) +
+  scale_color_manual(values = study_colors$methane) +
+  guides(color = "none") +
+  stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  scale_y_continuous(limits = ylim, 
+                       breaks = breaks) + 
+  coord_flip() +
+  labs(x = "",
+       y = glue("PC2 ({as.character(signif(importances$importance[2,2]*100, 3))}%)"),
+       fill = "") +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = c(0.98, 0.999),
+        legend.justification = c("right", "top"),
+        legend.title = element_blank(),
+        legend.background = element_rect(fill = "white"))
+
+boxplot_pc2
+```
+
+## Join both (PCA and PC1 boxplot)
+```{r}
+pca_joined <- scores_plot / boxplot_pc1 + 
+  plot_layout(heights = c(2, 1)) +
+  plot_annotation(tag_levels = "A")
+
+pca_joined
+```
+
+# Save results
+
+## Subfigures
+```{r}
+format <- "png" # png # pdf
+
+scores_plot
+ggsave(glue("{fig_dir}/{params$markdown_id}_Gut_environment_PCA_scores.{format}"),
+       bg = "white",
+       width = 8,
+       height = 6,
+       dpi = 300)
+
+boxplot_pc1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Gut_environment_PC1_boxplot.{format}"),
+       bg = "white",
+       width = 8,
+       height = 3,
+       dpi = 300)
+```
+
+## Joined Figure (supplementary material)
+```{r}
+format <- "png" # png # pdf
+
+pca_joined
+ggsave(glue("{fig_dir}/{params$markdown_id}_Gut_environment_PCA.{format}"),
+       bg = "white",
+       width = 8,
+       height = 8,
+       dpi = 300)
+```
+
+
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
