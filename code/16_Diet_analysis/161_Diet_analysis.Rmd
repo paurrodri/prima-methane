@@ -1,0 +1,754 @@
+---
+title: "Diet data analysis"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "161" # can be: "161" or "161_female"
+  # if "161_female", uncomment line 90, chunk 7
+  methane_group: "Methane_group"
+  cor_method: "spearman"
+  threshold_p: 0.05
+  threshold_fdr: 0.1
+
+---
+
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tidyverse)
+library(glue)
+library(openxlsx)
+library(ggpubr)
+library(patchwork)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_all_filename)
+meta_means_raw <- readRDS(meta_means_filename)
+```
+
+
+# Prepare data
+
+## Adjust diet variables per total kcal ingested and calculate macronutrient ratios
+```{r}
+diet_vars_all <- c("total_kcal",
+                   "carbohydrate", "fat", "protein",
+                   "fibre", 
+                    "fruit", "vegetables", "whole_grain", "nuts"
+                   )
+
+diet_vars_to_adjust <- c("carbohydrate", "fat", "protein",
+                   "fibre",
+                   "fruit", "vegetables", "whole_grain", "nuts"
+                   )
+
+diet_vars_adjusted <- paste0(diet_vars_to_adjust, "_per_1000_kcal")
+
+
+meta <- 
+  meta_raw %>%
+  ### !!!! FEMALE FILTER!! keep commented out
+  # filter(sex == "female") %>% 
+  #####
+    select(Sample_ID, Subject_ID,
+           !!sym(params$methane_group), 
+           all_of(diet_vars_all),
+           sex) %>% 
+    mutate(across(all_of(diet_vars_to_adjust),
+                  ~ .x / total_kcal * 1000,
+                   .names = "{.col}_per_1000_kcal")
+    ) %>% 
+  # other vars
+  mutate(fruit_vegetables = fruit + vegetables,
+         fruit_vegetables_per_1000_kcal = fruit_per_1000_kcal + vegetables_per_1000_kcal)
+
+
+meta_means <- meta %>% 
+  # recalculate means as so many variables were added
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .))) %>% 
+  left_join(meta_means_raw %>% select(Subject_ID, !!sym(params$methane_group), sex, ph_proximal_colon),
+            by = "Subject_ID")
+```
+
+## Create the variable names
+```{r}
+diet_vars_imp <- c("total_kcal",
+                   
+                   diet_vars_to_adjust[!grepl("fruit|vegetables",
+                                              diet_vars_to_adjust)],
+                   "fruit_vegetables",
+                   
+                   diet_vars_adjusted[!grepl("fruit|vegetables",
+                                              diet_vars_adjusted)],
+                   "fruit_vegetables_per_1000_kcal")
+
+diet_varnames_imp <- list(
+                     "Total energy intake (kcal/day)",
+                     
+                     "Carbohydrate (g/day)",
+                     "Fat (g/day)",
+                     "Protein (g/day)",
+                     "Fibre (g/day)",
+                     "Whole grain (g/day)",
+                     "Nuts (g/day)",
+                     "Fruit & vegetables (g/day)",
+                     
+                     "Carbohydrate (g/1000 kcal)",
+                     "Fat (g/1000 kcal)",
+                     "Protein (g/1000 kcal)",
+                     "Fibre (g/1000 kcal)",
+                     "Whole grain (g/1000 kcal)",
+                     "Nuts (g/1000 kcal)",
+                     "Fruit & vegetables (g/1000 kcal)"
+                     )
+
+diet_var_mapping <- diet_varnames_imp
+names(diet_var_mapping) <- diet_vars_imp
+
+```
+
+## Common aesthetics
+```{r}
+fontsize <- 14
+```
+
+## Order of the variables
+```{r}
+diet_vars_ordered <- c(
+  "total_kcal",
+  "carbohydrate",
+  "carbohydrate_per_1000_kcal",
+  "fat",
+  "fat_per_1000_kcal",
+  "protein",
+  "protein_per_1000_kcal",
+  "fibre",
+  "fibre_per_1000_kcal",
+  "fruit_vegetables",
+  "fruit_vegetables_per_1000_kcal",
+  "whole_grain", 
+  "whole_grain_per_1000_kcal",
+  "nuts", 
+  "nuts_per_1000_kcal"
+)
+```
+
+
+# Methane group comparison
+
+## Wilcox test - subject-level means
+```{r}
+gc_res_means <-
+  map(diet_vars_ordered, function(y){
+  
+    x <- params$methane_group
+    
+  
+    test <- compare_means(
+      as.formula(paste0("`", y, "` ~ `", x, "`")),
+      meta_means,
+      "wilcox.test",
+      exact = FALSE) %>%
+      mutate(
+        response = y,
+        mean_HMP = mean(meta_means[[y]][meta_means[[x]] == "HMP"],
+                        na.rm = TRUE),
+        sd_HMP   = sd(meta_means[[y]][meta_means[[x]] == "HMP"],
+                      na.rm = TRUE),
+        mean_LMP = mean(meta_means[[y]][meta_means[[x]] == "LMP"],
+                        na.rm = TRUE),
+        sd_LMP   = sd(meta_means[[y]][meta_means[[x]] == "LMP"],
+                      na.rm = TRUE),
+       label = case_when(
+        p < 0.001 ~ "p < 0.001",
+        p > 0.1   ~ "p > 0.1",
+        TRUE ~ glue("p = {round(p, 3)}")
+        ), .before = 1)
+
+       
+}) %>% bind_rows() %>% 
+  mutate(FDR = p.adjust(p, "BH"), .after = "p")
+
+gc_res_means
+```
+
+## Boxplots - means
+```{r}
+diet_boxplots_means <-
+  map(diet_vars_ordered, function(y){
+  
+    x <- params$methane_group
+    
+    ylab  <- diet_var_mapping[[y]] %>% str_extract("(?<=\\().*(?=\\))")
+
+    title <- diet_var_mapping[[y]]
+    print(title)
+    
+    ylim  <- c(0, 
+               paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 0))
+    
+    if (ylim[2]- ylim[1] > 2000){
+      breaks <- seq(ylim[1], ylim[2], 1000)
+    } else if (ylim[2]- ylim[1] > 250){
+      breaks <- seq(ylim[1], ylim[2], 100)
+    } else  if (ylim[2]- ylim[1] > 100) {
+      breaks <- seq(ylim[1], ylim[2], 50)
+    } else if (ylim[2]- ylim[1] > 20) {
+      breaks <- seq(ylim[1], ylim[2], 20)
+    } else if (ylim[2]- ylim[1] > 10) {
+      breaks <- seq(ylim[1], ylim[2], 5)
+    } else if (ylim[2]- ylim[1] > 5) {
+      breaks <- seq(ylim[1], ylim[2], 2)
+    } else if (ylim[2]- ylim[1] > 2) {
+      breaks <- seq(ylim[1], ylim[2], 1)
+    } else {
+      breaks <- seq(ylim[1], ylim[2], 0.5)
+    }
+      
+      
+
+    ppos <- mean(ylim[2], max(meta_means[[y]], na.rm = TRUE) )
+    
+    test <- compare_means(as.formula(paste0("`", y, "` ~ `", x, "`")),
+                            meta_means,
+                            "wilcox.test",
+                            exact = FALSE) %>%
+      mutate(label = case_when(
+              p < 0.001 ~ "p < 0.001",
+              p > 0.1   ~ "p > 0.1",
+              TRUE ~ glue("p = {round(p, 3)}")
+              ),
+             y.position = ppos
+             )
+
+       
+   meta_means %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) +
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1.5,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+      stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = title,
+          x = "", 
+          y = ylab, 
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 2.5,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4) 
+          ),
+          axis.title.y = element_text(size = fontsize - 2))
+       
+}) %>% wrap_plots(ncol = 5) & 
+  theme(plot.margin = margin(5, 10, 0, 10),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_rect(color = "black",
+                                    fill = NA, 
+                                    linewidth = 1.5)
+        )
+
+diet_boxplots_means
+```
+
+## Individual boxplots - means
+
+### A) Energy intake
+```{r}
+fontsize <- 14
+x <- params$methane_group
+y <- "total_kcal"
+ylab  <- diet_var_mapping[[y]] %>% str_extract("(?<=\\().*(?=\\))")
+title <- diet_var_mapping[[y]] %>% str_split_i(" \\(", 1)
+ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 2))
+breaks <- seq(ylim[1], ylim[2], 1000)
+ppos <- mean(ylim[2], max(meta_means[[y]], na.rm = TRUE) )
+test <- compare_means(as.formula(paste0("`", y, "` ~ `", x, "`")),
+                        meta_means,
+                        "wilcox.test",
+                        exact = FALSE) %>%
+  mutate(label = case_when(
+          p < 0.001 ~ "p < 0.001",
+          p > 0.1   ~ "p > 0.1",
+          TRUE ~ glue("p = {round(p, 3)}")
+          ),
+         y.position = ppos
+         )
+
+       
+energy_intake_boxplot <- meta_means %>% 
+   select(!!sym(x), !!sym(y)) %>% 
+   filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+   ggplot(aes(x = !!sym(x), 
+              y = !!sym(y),
+              fill = !!sym(x))) +
+   geom_boxplot(outlier.shape = NA,
+                color = "black") +
+   geom_jitter(aes(fill = !!sym(x)), 
+               color = "black",
+               shape = 21,
+               size = 1.75,
+               height = 0,
+               stroke = 1.2,
+               alpha = 0.6) +
+   scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+      test,
+      label = "label",
+      tip.length = 0.01,
+      size = 4
+    ) +
+   labs(title = title,
+        x = "", 
+        y = ylab, 
+        ) +
+  scale_y_continuous(limits = ylim,
+                     breaks = breaks,
+                     expand = expansion(mult = c(0.05, 0.15))) +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = "none",
+        plot.title = ggtext::element_textbox_simple(
+          fill = "gray80",        
+          color = "black",       
+          box.color = "black",    
+          size = fontsize - 2.5,
+          linetype = 1,
+         linewidth = 0.75,         
+          padding = margin(4,4,4,4) 
+        ),
+        axis.title.y = element_text(size = fontsize - 2))
+
+energy_intake_boxplot
+```
+
+### B) Macronutrients
+```{r}
+x <- params$methane_group
+
+macronut_boxplots <- map(c("carbohydrate", "fat", "protein"), function(y){
+
+  ylab  <- diet_var_mapping[[y]] %>% str_extract("(?<=\\().*(?=\\))")
+  title <- diet_var_mapping[[y]] %>% str_split_i(" \\(", 1)
+  
+  if (y == "carbohydrate"){
+    ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 1)+10)
+      breaks <- seq(ylim[1], ylim[2], 100)
+  } else {
+      ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 1)+30)
+      breaks <- seq(ylim[1], ylim[2], 50)
+  }
+
+  
+  
+  ppos <- mean(ylim[2], max(meta_means[[y]], na.rm = TRUE) )
+  test <- compare_means(as.formula(paste0("`", y, "` ~ `", x, "`")),
+                          meta_means,
+                          "wilcox.test",
+                          exact = FALSE) %>%
+    mutate(label = case_when(
+            p < 0.001 ~ "p < 0.001",
+            p > 0.1   ~ "p > 0.1",
+            TRUE ~ glue("p = {round(p, 3)}")
+            ),
+           y.position = ppos
+           )
+  
+         
+  meta_means %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) +
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1.75,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+      stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = 4
+      ) +
+     labs(title = title,
+          x = "", 
+          y = ylab, 
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 4,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4) 
+          ),
+          axis.title.y = element_text(size = fontsize - 2))
+}) %>% wrap_plots(ncol = 3) + plot_layout(axis = "collect_y")
+
+macronut_boxplots
+```
+
+### C) Fibre-related boxplots
+```{r}
+x <- params$methane_group
+
+fibre_related_boxplots <- map(c(
+  "fibre_per_1000_kcal",
+  "whole_grain_per_1000_kcal",
+  "nuts_per_1000_kcal",
+  "fruit_vegetables_per_1000_kcal"),
+  function(y){
+
+  ylab  <- diet_var_mapping[[y]] %>% str_extract("(?<=\\().*(?=\\))")
+  title <- diet_var_mapping[[y]] %>% str_split_i(" \\(", 1)
+  
+  if (y == "fruit_vegetables_per_1000_kcal"){
+    ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 2)+10)
+    breaks <- seq(ylim[1], ylim[2], 200)
+  } else if (y == "fibre_per_1000_kcal") {
+    ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 1))
+    breaks <- seq(ylim[1], ylim[2], 10)
+  } else if (y == "nuts_per_1000_kcal") {
+    ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T)+2, 1))
+    breaks <- seq(ylim[1], ylim[2], 10)
+  } else {
+    ylim  <- c(0, paulaR::ceiling_signif(max(meta_means[[y]], na.rm = T), 0)+2)
+    breaks <- seq(ylim[1], ylim[2], 25)
+  }
+
+  
+  
+  ppos <- mean(ylim[2], max(meta_means[[y]], na.rm = TRUE) )
+  test <- compare_means(as.formula(paste0("`", y, "` ~ `", x, "`")),
+                          meta_means,
+                          "wilcox.test",
+                          exact = FALSE) %>%
+    mutate(label = case_when(
+            p < 0.001 ~ "p < 0.001",
+            p > 0.1   ~ "p > 0.1",
+            TRUE ~ glue("p = {round(p, 3)}")
+            ),
+           y.position = ppos
+           )
+  
+         
+  meta_means %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) +
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1.75,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+      stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = 4
+      ) +
+     labs(title = title,
+          x = "", 
+          y = ylab, 
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 4,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4) 
+          ),
+          axis.title.y = element_text(size = fontsize - 2))
+}) %>% wrap_plots(ncol = 4) + plot_layout(axis = "collect_y")
+fibre_related_boxplots
+```
+
+
+
+
+# Potential confounders
+## Sex
+```{r}
+if (!str_detect(params$markdown_id, "female")){
+
+  vars <- c("total_kcal", "carbohydrate", "fat", "protein", 
+            "fibre_per_1000_kcal",  
+            "whole_grain_per_1000_kcal",
+            "fruit_vegetables_per_1000_kcal")
+  
+  sex_res <- map(vars, function(y){
+    f <- as.formula(paste(y," ~ ", params$methane_group, " + sex"))
+    model <- lm(f, data = meta_means)
+    p <- coefficients(summary(model))[2, "Pr(>|t|)"]
+    tibble(response = y,
+           adjusted_for = "sex",
+           p = p)
+  }) %>% bind_rows()
+  
+  y <- "protein"
+  f <- as.formula(paste(y," ~ ", params$methane_group, " + sex"))
+  model <- lm(f, data = meta_means)
+  summary(model)
+}
+```
+
+## pH and diet
+```{r}
+vars <- c("fibre_per_1000_kcal",  
+          "whole_grain_per_1000_kcal",
+          "nuts_per_1000_kcal",
+          "fruit_vegetables_per_1000_kcal")
+
+# group comparison
+ph_fibre_gc_res <- map(vars, function(confounder){
+  
+  f <- as.formula(paste("ph_proximal_colon ~ ", params$methane_group, "+",  confounder))
+  
+  model <- lm(f, data = meta_means)
+  
+  p_x <- coefficients(summary(model))[2, "Pr(>|t|)"]
+  p_conf <- coefficients(summary(model))[3, "Pr(>|t|)"]
+  
+  tibble(y = "ph_proximal_colon",
+         x = params$methane_group,
+         confounder = confounder,
+         p_methane_group = p_x,
+         p_confounder = p_conf)
+}) %>% bind_rows()
+
+
+# correlations
+ph_fibre_cor_lm_res <- map(vars, function(x){
+  
+  f <- as.formula(paste("ph_proximal_colon ~ ", x))
+  
+  model <- lm(f, data = meta_means)
+  
+  p <- coefficients(summary(model))[2, "Pr(>|t|)"]
+  
+  tibble(y = "ph_proximal_colon",
+         x = x,
+         p = p)
+  
+}) %>% bind_rows()
+
+ph_fibre_cor_kendall_res <- map(vars, function(x){
+  
+  test <- cor.test(
+    meta_means$ph_proximal_colon,
+    meta_means[[x]],
+    method = "kendall",
+    use = "complete.obs"
+  )
+  
+  r <- test$estimate
+  p <- test$p.value
+  
+  tibble(y = "ph_proximal_colon",
+         x = x,
+         r = r,
+         p = p)
+  
+}) %>% bind_rows()
+
+# interpret results
+ph_fibre_gc_res 
+# all P-values after adjusting are closer to 0.05 (non adjusted model = 0.017) but still below 0.05
+ph_fibre_cor_kendall_res
+# ph proximal colonic pH is not significantly corr to fibre, fruit, nuts except for whole grain (-0.21, P = 0.043)
+```
+
+
+# Some numbers for the paper
+```{r}
+# MACRONUTRIENTS --------------
+gc_res_means %>% 
+  filter(response %in% c("total_kcal", "protein", "fat", "carbohydrate")) %>% 
+  # correct only for macronutrient comp.
+  mutate(FDR = p.adjust(p, "BH")) %>% 
+  select(response, p, FDR)
+
+meta_means %>% 
+  select(!!sym(params$methane_group), protein, total_kcal) %>% 
+  group_by(!!sym(params$methane_group)) %>% 
+  summarise(kcal_mean = mean(total_kcal, na.rm = TRUE),
+            kcal_sd = sd(total_kcal, na.rm = TRUE),
+            prot_mean = mean(protein, na.rm = TRUE),
+            prot_sd = sd(protein, na.rm = TRUE)
+            )
+
+if (!str_detect(params$markdown_id, "female")){
+  sex_res %>% 
+    filter(response %in% c("total_kcal", "protein", "fat", "carbohydrate")) %>% 
+    # correct only for macronutrient comp.
+    mutate(FDR = p.adjust(p, "BH")) %>% 
+    select(response, p, FDR)
+} 
+
+# FIBRE-RELATED FOODS ----------------
+gc_res_means %>% 
+  filter(response %in% c("fibre_per_1000_kcal", 
+                         "whole_grain_per_1000_kcal",
+                         "nuts_per_1000_kcal",
+                         "fruit_vegetables_per_1000_kcal")) %>% 
+  # correct only for macronutrient comp.
+  mutate(FDR = p.adjust(p, "BH")) %>% 
+  select(response, p, FDR)
+```
+
+
+
+
+# Save results
+## Diet data extended
+```{r}
+saveRDS(meta %>% select(Sample_ID, Subject_ID, all_of(diet_vars_ordered)),
+        glue("{rds_dir}/{params$markdown_id}_diet_data_extended.rds"))
+saveRDS(meta_means %>% select(Subject_ID, all_of(diet_vars_ordered)),
+        glue("{rds_dir}/{params$markdown_id}_diet_data_extended_means.rds"))
+```
+
+## Comparison results
+```{r}
+write.xlsx(gc_res_means,
+             glue("{tab_dir}/{params$markdown_id}_means_diet_methane_group_comparison.xlsx"))
+saveRDS(gc_res_means,
+             glue("{rds_dir}/{params$markdown_id}_means_diet_methane_group_comparison.rds"))
+```
+
+## Figures
+```{r}
+format <- "png" # png # pdf
+
+
+diet_boxplots_means
+ggsave(glue("{fig_dir}/{params$markdown_id}_diet_boxplots_means.{format}"),
+       bg = "white",
+       width = 10,
+       height = 8,
+       dpi = 300)
+
+
+energy_intake_boxplot
+ggsave(glue("{fig_dir}/{params$markdown_id}_energy_intake_boxplot_means.{format}"),
+       bg = "white",
+       width = 2.8,
+       height = 3,
+       dpi = 300)
+saveRDS(energy_intake_boxplot,
+        glue("{rds_dir}/{params$markdown_id}_energy_intake_boxplot_means.rds"))
+
+macronut_boxplots
+ggsave(glue("{fig_dir}/{params$markdown_id}_macronutrients_boxplots_means.{format}"),
+       bg = "white",
+       width = 7,
+       height = 3.5,
+       dpi = 300)
+saveRDS(macronut_boxplots,
+        glue("{rds_dir}/{params$markdown_id}_macronutrients_boxplots_means.rds"))
+
+fibre_related_boxplots
+ggsave(glue("{fig_dir}/{params$markdown_id}_fibre_related_boxplots_means.{format}"),
+       bg = "white",
+       width = 7,
+       height = 3,
+       dpi = 300)
+saveRDS(fibre_related_boxplots,
+        glue("{rds_dir}/{params$markdown_id}_fibre_related_boxplots_means.rds"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

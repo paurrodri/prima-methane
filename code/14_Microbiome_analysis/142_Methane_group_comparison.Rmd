@@ -1,0 +1,780 @@
+---
+title: "Microbiome comparison, HMP vs LMP, linear models"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "142_genus_counts" # can be: "142_asv_counts" or "142_genus_counts"
+  methane_group: "Methane_group"
+  
+  microbiome_filename: genus_counts_filename # can be: "asv_counts_filename" or "genus_counts_filename"
+  
+  tax_level: "genus" # can be: "ASV" or "genus"
+  is_ub_means: FALSE # should be: FALSE
+  
+  # thresholds: equal or above
+  abu_filter_perc: 0.01 # 0.01 perc, this works if microbiome data rowSums() is 100
+  prev_filter_perc: 0.1 # 10% of samples
+  
+  pseudocount: 1e-6
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+```
+
+## Study parameters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+# Read data
+## Meta
+```{r}
+if (params$is_ub_means){
+  meta_raw <- readRDS(meta_means_filename)
+} else {
+  meta_raw <- readRDS(meta_all_filename)
+}
+```
+
+## Microbiome (μb) data
+```{r}
+ub_raw     <- readRDS(get(params$microbiome_filename))
+
+# for abundance filtering, one needs the rel abundances file
+ub_rar_relabu_filename <- params$microbiome_filename %>%
+  str_replace("counts", "rar_relabu")
+ub_rar_relabu_raw <- readRDS(get(ub_rar_relabu_filename))
+
+taxonomic_annotation <- readRDS(taxonomic_annotation_filename)
+```
+
+# Clean data
+```{r}
+meta <- meta_raw %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+
+if (params$is_ub_means){
+  ub   <- ub_raw %>% 
+  filter(Subject_ID %in% meta$Subject_ID)
+  
+  ub_rar_relabu   <- ub_rar_relabu_raw %>% 
+  filter(Subject_ID %in% meta$Subject_ID)
+  
+} else {
+  ub   <- ub_raw %>% 
+  filter(Sample_ID %in% meta$Sample_ID)
+  
+   ub_rar_relabu   <- ub_rar_relabu_raw %>% 
+  filter(Sample_ID %in% meta$Sample_ID)
+}
+```
+
+
+# Prepare data
+
+## Prev and abu filtering
+```{r}
+prev     <- colMeans(ub[, -1] > 0)
+prev_filter <- prev >= params$prev_filter_perc
+
+
+# for abundance filtering, one actually needs the rel abu file
+mean_abu <- colMeans(ub_rar_relabu[, -1]) 
+abu_filter  <- mean_abu >= params$abu_filter_perc
+
+
+filtered_taxa <- names(abu_filter & prev_filter)[abu_filter & prev_filter]
+length(filtered_taxa)
+```
+
+## Prepare data for models
+```{r}
+# confounders
+tt_vars <- c("GET", "SBTT", "CTT", "SLBTT", "WGTT")
+
+
+if (params$is_ub_means){
+  
+  # only used for visualizations, not for the models
+  ub_meta <- ub %>% 
+    # filter taxa
+    select(Subject_ID, all_of(filtered_taxa)) %>% 
+    left_join(meta %>% 
+                select(Subject_ID,
+                       !!sym(params$methane_group),
+                       all_of(tt_vars)
+                       ),
+              by = "Subject_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Subject_ID")
+  
+  # clr-transformed data 
+  ub_clr_meta <- 
+    ub %>%
+  # filter taxa
+  select(Subject_ID, all_of(filtered_taxa)) %>% 
+  # clr transformation
+  mutate(across(all_of(filtered_taxa), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Subject_ID),
+      compositions::clr(select(., all_of(filtered_taxa)))
+      )
+  } %>%
+    left_join(meta %>% 
+                select(Subject_ID,
+                       !!sym(params$methane_group),
+                       all_of(tt_vars)
+                       ),
+              by = "Subject_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Subject_ID")
+  
+  
+} else {
+  
+  # only used for visualizations, not for the models
+  ub_meta <-
+     ub %>%
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") %>% 
+  # filter taxa
+  select(Sample_ID, Subject_ID, all_of(filtered_taxa)) %>% 
+  left_join(meta %>% 
+              select(Sample_ID,
+                     !!sym(params$methane_group),
+                     all_of(tt_vars)
+                     ),
+            by = "Sample_ID") %>% 
+  relocate(!!sym(params$methane_group),
+           .after = "Subject_ID")
+    
+   
+ # clr-transformed data
+  ub_clr_meta <- 
+    ub %>%
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") %>% 
+  # filter taxa
+  select(Sample_ID, Subject_ID, all_of(filtered_taxa)) %>% 
+  # clr transformation
+  mutate(across(all_of(filtered_taxa), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Sample_ID, Subject_ID),
+      compositions::clr(select(., all_of(filtered_taxa)))
+      )
+  } %>%
+  left_join(meta %>% 
+              select(Sample_ID,
+                     !!sym(params$methane_group),
+                     all_of(tt_vars)
+                     ),
+            by = "Sample_ID") %>% 
+  relocate(!!sym(params$methane_group), .after = "Subject_ID")
+}
+```
+
+
+# Linear models
+
+## Adjustment only by Subject_ID as random effect (adjustment only if longitudinal)
+```{r}
+x <- params$methane_group
+total_all <- nrow(ub_meta)
+total_hmp <- nrow(ub_meta %>% filter(!!sym(params$methane_group) == "HMP"))
+total_lmp <- nrow(ub_meta %>% filter(!!sym(params$methane_group) == "LMP"))
+  
+
+lm_unadj_res <- map(filtered_taxa, function(y){
+
+  # using CLR data
+  model_data <- ub_clr_meta %>%
+      dplyr::select(all_of(c(x, y, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+  
+  subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+  n_hmp <- subject_counts[[1,2]]
+  n_lmp <- subject_counts[[2,2]]
+  n_total <- nrow(model_data)
+  
+  if (params$is_ub_means){
+    
+    f <- as.formula(paste0("`", y, "` ~ `", x, "`"))
+    random_effect <- ""
+    model <- lm(f, data = model_data)
+  
+  } else {
+    f <- as.formula(paste0("`", y, "` ~ `", x, "` + (1|Subject_ID)"))
+    random_effect <- "(1|Subject_ID)"
+    model <- lmerTest::lmer(f, data = model_data)
+  }
+    
+  # extract pval
+  pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+  
+  # extract log2fold change and CI
+  coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+  log2FC <- coef / log(2)
+  
+  # extract 95% CI
+  se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_log <- coef + c(-1, 1) * 1.96 * se
+  ci_log2 <- ci_log / log(2)
+  
+  sd_y <- sd(model_data[[y]], na.rm = TRUE)
+  coef_std <- coef / sd_y
+
+  tibble::tibble(response = y,
+                 predictor = x,
+                 adjusted_by = random_effect,
+                 n_total = glue("{n_total}/{total_all}"),
+                 n_HMP = glue("{n_hmp}/{total_hmp}"),
+                 n_LMP = glue("{n_lmp}/{total_lmp}"),
+                 estimate = coef,
+                 estimate_std = coef_std,
+                 log2FC = log2FC,
+                 CI_log2FC_lower = ci_log2[1],
+                 CI_log2FC_upper = ci_log2[2],
+                 p = pval,
+                 beta_confounder = NA,
+                 p_confounder = NA
+                 )
+
+}) %>% bind_rows() %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>%
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+
+if (params$tax_level == "ASV"){
+    lm_unadj_res %<>% 
+    left_join(taxonomic_annotation %>% 
+                  select(
+                    !!sym(params$tax_level),
+                    closest_tax),
+                by = c("response" = params$tax_level)) %>% 
+      relocate(c(closest_tax), .after = response)
+  
+  }
+```
+
+## Adjustment by transit time as fixed effect and Subject_ID as random effect (Subject ID adjustment only if longitudinal)
+```{r}
+x <- params$methane_group
+combi <- expand_grid(y = filtered_taxa,
+                     fixed_effect = tt_vars)
+total_all <- nrow(ub_meta)
+total_hmp <- nrow(ub_meta %>% filter(!!sym(params$methane_group) == "HMP"))
+total_lmp <- nrow(ub_meta %>% filter(!!sym(params$methane_group) == "LMP"))
+
+
+lm_adj_res <-
+  pmap(combi, function(y, fixed_effect){
+  
+  # using CLR data
+  model_data <- ub_clr_meta %>%
+      dplyr::select(all_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+
+  
+    subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+    n_hmp <- subject_counts[[1,2]]
+    n_lmp <- subject_counts[[2,2]]
+    n_total <- nrow(model_data)
+  
+    if (params$is_ub_means){
+    
+      random_effect <- ""
+      f <- as.formula(paste0("`", y, "` ~ `", x, "` + `", fixed_effect, "`"))
+      model <- lm(f, data = model_data)
+
+  } else {
+      random_effect <- " + (1|Subject_ID)"
+      f <- as.formula(paste0("`", y, "` ~ `", x, "` + `", fixed_effect, "` + (1|Subject_ID)"))
+      
+      model <- lmerTest::lmer(f, data = model_data)
+  }
+    
+  # extract pval
+  pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+  
+  # extract log2fold change and CI
+  coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+  log2FC <- coef / log(2)
+  
+  # extract 95% CI
+  se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_log <- coef + c(-1, 1) * 1.96 * se
+  ci_log2 <- ci_log / log(2)
+  
+    # extract std beta (in CLR units if model data not QMP)
+  sd_y <- sd(model_data[[y]], na.rm = TRUE)
+  coef_std <- coef / sd_y
+    
+
+  coef_tt <- as.numeric(summary(model)$coefficients[3, "Estimate"])
+  pval_tt <- as.numeric(summary(model)$coefficients[3, "Pr(>|t|)"])
+
+
+  tibble::tibble(response = y,
+                 predictor = x,
+                 adjusted_by = glue("{fixed_effect}{random_effect}"),
+                 n_total = glue("{n_total}/{total_all}"),
+                 n_HMP = glue("{n_hmp}/{total_hmp}"),
+                 n_LMP = glue("{n_lmp}/{total_lmp}"),
+                 estimate = coef,
+                 estimate_std = coef_std,
+                 log2FC = log2FC,
+                 CI_log2FC_lower = ci_log2[1],
+                 CI_log2FC_upper = ci_log2[2],
+                 p = pval,
+                 beta_confounder = coef_tt,
+                 p_confounder = pval_tt
+                 )
+
+}) %>% bind_rows() %>% 
+  group_by(adjusted_by) %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup() %>%
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+
+
+if (params$tax_level == "ASV"){
+    lm_adj_res %<>% 
+    left_join(taxonomic_annotation %>% 
+                  select(
+                    !!sym(params$tax_level),
+                    closest_tax),
+                by = c("response" = params$tax_level)) %>% 
+      relocate(c(closest_tax), .after = response)
+  
+  }
+```
+
+## Combine all results
+```{r}
+lm_res <- bind_rows(lm_unadj_res, lm_adj_res) %>% 
+  arrange(response) %>% 
+  mutate(signif_p_confounder = get_significance_asterisks(p_confounder, asterisks_p))
+```
+
+
+
+# Extra plots
+## Ind bacterium distribution
+```{r}
+if (params$tax_level == "genus"){
+  
+  x <- "Methane_group" #params$methane_group
+  fontsize <- 14
+  
+  vars <- c("Agathobacter",
+            "Anaerobutyricum",
+            "Anaerostipes",
+            "Bifidobacterium",
+            "Beduinibacterium", 
+            "Blautia",
+            "Butyrivibrio",
+            "Clostridium_IV",
+            "Eubacterium",
+            "Faecalibacterium",
+            "Intestinimonas",
+            "Lactobacillus", 
+            "Massilimicrobiota",
+            "Monoglobus",
+            "Oscillibacter",
+            "Pseudoflavonifractor",
+            "Streptococcus"
+            )
+  
+bact_boxplots <-  map(vars, function(y){
+    ylim <- c(0, paulaR::ceiling_signif(max(ub_meta[[y]], na.rm = T), 0))
+    
+    if (x %in% colnames(ub_meta)){
+      model_data <- ub_meta %>% 
+           select(!!sym(x), !!sym(y)) %>% 
+           na.omit()
+    } else {
+      
+      if (params$is_ub_means){
+          model_data <- ub_meta %>% 
+            left_join(meta %>% select(!!sym(x), Subject_ID),
+                      by = "Subject_ID") %>% 
+           select(!!sym(x), !!sym(y)) %>% 
+           na.omit()
+      } else {
+          model_data <- ub_meta %>% 
+            left_join(meta %>% select(!!sym(x), Sample_ID),
+                      by = "Sample_ID") %>% 
+           select(!!sym(x), !!sym(y)) %>% 
+           na.omit()
+      }
+    }
+    
+    subject_counts <- model_data %>% 
+      group_by(group = !!sym(x)) %>% 
+      count()
+    
+    labels <- setNames(
+      paste0(subject_counts$group, "\n(N=", subject_counts$n, ")"),
+      subject_counts$group
+    )
+    
+    
+    test <- compare_means(as.formula(paste(y, "~", x)),
+                          model_data,
+                          "wilcox.test",
+                          exact = FALSE) %>%
+      mutate(label = ifelse(
+        p < 0.001,
+        "p < 0.001",
+        glue("p = {round(p, 3)}")
+        ),
+        y.position = max(model_data[[y]], na.rm = TRUE) * 1.05
+        )
+    
+    bact_groups_boxplot <- 
+      model_data %>% 
+         select(!!sym(x), !!sym(y)) %>% 
+         filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+         ggplot(aes(x = !!sym(x), 
+                    y = !!sym(y),
+                    fill = !!sym(x))) + 
+         geom_boxplot(outlier.shape = NA,
+                      color = "black") +
+         geom_jitter(aes(fill = !!sym(x)), 
+                     color = "black",
+                     shape = 21,
+                     size = 1,
+                     height = 0,
+                     stroke = 1.2,
+                     alpha = 0.6) +
+         scale_fill_manual(values = study_colors[[x]]) +
+        stat_pvalue_manual(
+            test,
+            label = "label",
+            tip.length = 0.01,
+            size = fontsize/5
+          ) +
+      scale_x_discrete(labels = labels) +
+         labs(title = "",
+              y = glue("{y} (%)"),
+              x = "",
+              ) +
+        coord_cartesian(ylim = ylim) +
+        scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+        paulaR::white_theme(font_size = fontsize) +
+        theme(legend.position = "none")
+    
+    bact_groups_boxplot
+  }) %>% wrap_plots() 
+
+bact_boxplots 
+
+}
+
+
+```
+
+## Christensenella/ceae
+```{r}
+if (!params$is_ub_means & params$tax_level == "genus" & params$methane_group == "Methane_group"){
+
+filtered_taxa %>% str_extract("Christ") # it must have been filtered out after abundance or prevalence filters
+
+# do we really have these taxa in the overall file?
+taxonomic_annotation %>% filter(Family == "Christensenellaceae")  # yes, 8 ASV
+
+christ_asv <- taxonomic_annotation %>% filter(Family == "Christensenellaceae") %>% arrange(closest_tax) %>% pull(ASV) %>% unique()
+christ_gen <- taxonomic_annotation %>% filter(Family == "Christensenellaceae") %>% arrange(closest_tax) %>%  pull(genus_or_closest) %>% unique()
+christ_colnames <- c("Christensenellaceae", christ_gen, christ_asv)
+
+
+# it seems only beduinibacterium passed the filter
+prev[["Christensenella"]] # 29%
+prev[["Beduinibacterium"]] # 24%
+prev[["Unclassified Christensenellaceae"]] # 61%
+
+mean_abu[["Christensenella"]] #  0.002%
+mean_abu[["Beduinibacterium"]] # 0.010%
+mean_abu[["Unclassified Christensenellaceae"]] # 0.008%
+
+
+# get the data
+asv_counts  <- readRDS(asv_counts_filename)
+genus_counts  <- readRDS(genus_counts_filename)
+family_counts  <- readRDS(family_counts_filename)
+
+
+asv_rar_relabu  <- readRDS(asv_rar_relabu_filename)
+genus_rar_relabu  <- readRDS(genus_rar_relabu_filename)
+family_rar_relabu  <- readRDS(family_rar_relabu_filename)
+
+
+# clr transformation
+asv_clr <- asv_counts %>%
+  mutate(across(-c(Sample_ID), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Sample_ID),
+      compositions::clr(select(., -c(Sample_ID))))
+      
+  } %>%
+    left_join(meta %>% 
+                select(Sample_ID,
+                       !!sym(params$methane_group)
+                       ),
+              by = "Sample_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Sample_ID")
+
+genus_clr <- genus_counts %>%
+  mutate(across(-c(Sample_ID), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Sample_ID),
+      compositions::clr(select(., -c(Sample_ID))))
+      
+  } %>%
+    left_join(meta %>% 
+                select(Sample_ID,
+                       !!sym(params$methane_group)
+                       ),
+              by = "Sample_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Sample_ID")
+
+family_clr <- family_counts %>%
+  mutate(across(-c(Sample_ID), ~ .x + as.numeric(params$pseudocount))) %>%  
+  { bind_cols(
+      select(., Sample_ID),
+      compositions::clr(select(., -c(Sample_ID))))
+      
+  } %>%
+    left_join(meta %>% 
+                select(Sample_ID,
+                       !!sym(params$methane_group)
+                       ),
+              by = "Sample_ID") %>% 
+    relocate(!!sym(params$methane_group), .after = "Sample_ID")
+
+
+christ_counts <- asv_counts %>% 
+  select(Sample_ID, all_of(christ_asv)) %>% 
+  left_join(genus_counts %>% select(Sample_ID, all_of(christ_gen)),
+            by = "Sample_ID") %>% 
+  left_join(family_counts %>% select(Sample_ID, "Christensenellaceae"),
+            by = "Sample_ID") %>% 
+  left_join(meta %>% select(Sample_ID, !!sym(params$methane_group)),
+            by = "Sample_ID") %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") %>% 
+  relocate(!!sym(params$methane_group), .after = "Subject_ID")
+
+
+christ_rar_relabu <- asv_rar_relabu %>% 
+  select(Sample_ID, all_of(christ_asv)) %>% 
+  left_join(genus_rar_relabu %>% select(Sample_ID, all_of(christ_gen)),
+            by = "Sample_ID") %>% 
+  left_join(family_rar_relabu %>% select(Sample_ID, "Christensenellaceae"),
+            by = "Sample_ID") %>% 
+  left_join(meta %>% select(Sample_ID, !!sym(params$methane_group)),
+            by = "Sample_ID") %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") %>% 
+  relocate(!!sym(params$methane_group), .after = "Subject_ID")
+
+
+christ_clr <- asv_clr %>% 
+  select(Sample_ID, !!sym(params$methane_group), all_of(christ_asv)) %>% 
+  left_join(genus_clr %>% select(Sample_ID, all_of(christ_gen)),
+            by = "Sample_ID") %>% 
+  left_join(family_clr %>% select(Sample_ID, "Christensenellaceae"),
+            by = "Sample_ID") %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .after = "Sample_ID") 
+
+
+x <- params$methane_group
+fontsize <- 14
+
+christ_boxplots <- map(christ_colnames[1:4], function(y){
+  
+  model_data <- christ_clr %>% 
+    select(!!sym(x), !!sym(y), Subject_ID)
+  
+  plot_data <- christ_rar_relabu %>% 
+     select(!!sym(x), !!sym(y), Subject_ID)
+  
+  
+  f <- as.formula(paste0("`", y, "` ~  + `", x, "` + (1|Subject_ID)"))
+  
+  model <- lmerTest::lmer(f, data = model_data)
+  
+  pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+  coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+  print(y)
+  print(coef)
+  
+  pval_pos <- 15
+  
+  plot_p_aes <- tibble(
+    .y. = y,
+    group1 = "HMP",
+    group2 = "LMP",
+    p = pval
+  ) %>%  mutate(label = ifelse(
+        p < 0.001,
+        "p < 0.001",
+        glue("p = {round(p, 3)}")
+        ),
+        y.position = pval_pos
+        )
+  
+  ylim <- c(0, paulaR::ceiling_signif(max(plot_data[[y]], na.rm = T), -1))
+  
+  title <- ifelse(str_detect(y, "ASV"),
+                  glue("{y} ({taxonomic_annotation %>% filter(ASV == y) %>% pull(closest_tax)})"),
+                  y)
+  
+  plot_data %>% 
+         select(!!sym(x), !!sym(y)) %>% 
+         filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+         ggplot(aes(x = !!sym(x), 
+                    y = !!sym(y),
+                    fill = !!sym(x))) + 
+         geom_boxplot(outlier.shape = NA,
+                      color = "black") +
+         geom_jitter(aes(fill = !!sym(x)), 
+                     color = "black",
+                     shape = 21,
+                     size = 1,
+                     height = 0,
+                     stroke = 1.2,
+                     alpha = 0.6) +
+         scale_fill_manual(values = study_colors[[x]]) +
+        stat_pvalue_manual(
+            plot_p_aes,
+            label = "label",
+            tip.length = 0.01,
+            size = fontsize - 10
+          ) +
+      scale_x_discrete() +
+         labs(title = title,
+              y = glue("Rel. abundance (%)"),
+              x = "",
+              ) +
+        scale_y_continuous(
+        trans = scales::pseudo_log_trans(
+        base = 2, sigma = 0.0001),
+        limits = c(-0.00025, pval_pos),
+       breaks = c(0, 0.001, 0.01, 0.1, 1),
+        ) +
+        paulaR::white_theme(font_size = fontsize) +
+        theme(legend.position = "none",
+              title = element_text(size = fontsize-4),
+              axis.title.y = element_text(size = fontsize))
+  
+  
+}) %>% wrap_plots(ncol = 2) + plot_annotation(tag_levels = "A")
+
+
+christ_boxplots
+
+
+}
+```
+
+
+# Extra numbers for the paper
+```{r}
+if (params$tax_level == "genus"){
+  # butyrivibrio
+  lm_res %>% 
+    filter(response == "Butyrivibrio") %>% 
+    select(response, adjusted_by, p, FDR) %>% 
+    mutate(p = round(p, 4),
+           FDR = round(FDR, 4)) %>% 
+    flextable()
+}
+```
+
+
+
+
+# Save results
+
+
+## Linear models
+```{r}
+write.xlsx(lm_res,
+             glue("{tab_dir}/{params$markdown_id}_ub_methane_group_tt_linear_models.xlsx"))
+saveRDS(lm_res,
+             glue("{rds_dir}/{params$markdown_id}_ub_methane_group_tt_linear_models.rds"))
+```
+
+## Individual bacterial boxplots
+```{r}
+if (params$tax_level == "genus" & !str_detect(params$markdown_id, "QMP")){
+  format <- "png" # png # pdf
+  
+  bact_boxplots + plot_layout(ncol = 3)
+  ggsave(glue("{fig_dir}/{params$markdown_id}_boxplots_ind_genera_vertical.{format}"),
+         bg = "white",
+         width = 12,
+         height = 20,
+         dpi = 300)
+  
+  bact_boxplots + plot_layout(ncol = 5)
+  ggsave(glue("{fig_dir}/{params$markdown_id}_boxplots_ind_genera_horizontal.{format}"),
+         bg = "white",
+         width = 20,
+         height = 12,
+         dpi = 300)
+  
+  christ_boxplots
+  ggsave(glue("{fig_dir}/{params$markdown_id}_Christensenellaceae_family_genera_boxplots.{format}"),
+         bg = "white",
+         width = 8,
+         height = 7,
+         dpi = 300)
+}
+```
+
+
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

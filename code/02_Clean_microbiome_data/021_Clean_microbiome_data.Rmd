@@ -1,0 +1,704 @@
+---
+title: "Clean microbiome data"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "021"
+---
+
+Microbiome data will be cleaned/processed from this file:
+- merged.phyloseq_object_rdp_v18.RData
+This file was generated at DTU following their own pipeline (https://doi.org/10.11583/DTU.22657339), which includes: demultiplexing, DADA2, and taxonomic annotation
+
+
+The microbiome post-processing conducted in this script consists of these steps:
+1) Filter samples: remove non-biological samples, samples with < 10000 total reads
+2) Filter ASVs: remove mitochondria/chloroplasts and singletons/doubletons
+3a) Save the filtered read counts
+3b) Turn counts to rel. abundances
+3c) Rarefy read counts
+3d) Turn the rarefied counts to relative abundances
+4) For the 4 datasets from step 3: aggregate ASVs to genus and family levels
+5) Calculate alpha diversity from the rarefied relative abundances, at ASV level
+6) For the 8 datasets from steps 3-4: calculate subject-means (*)
+
+
+The resulting output files will be:
+
+- 1) asv_counts.rds
+- 2) asv_relabu.rds
+- 3) asv_rar_counts.rds
+- 4) asv_rar_relabu.rds
+
+- 5) genus_counts.rds
+- 6) genus_relabu.rds
+- 7) genus_rar_counts.rds
+- 8) genus_rar_relabu.rds
+
+- 9)  asv_counts_means.rds
+- 10) asv_relabu_means.rds
+- 11) asv_rar_counts_means.rds
+- 12) asv_rar_relabu_means.rds
+
+- 13) genus_counts_means.rds
+- 14) genus_relabu_means.rds
+- 15) genus_rar_counts_means.rds
+- 16) genus_rar_relabu_means.rds
+
+- 17) family_counts_means.rds
+- 18) family_relabu_means.rds
+- 19) family_rar_counts_means.rds
+- 20) family_rar_relabu_means.rds
+
+- 21) alpha_diversity.rds
+- 22) alpha_diversity_means.rds
+
+- 23) taxonomic_annotation.rds
+
+
+
+
+
+# Setup
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                      root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(glue)
+library(stringr)
+library(phyloseq)
+library(vegan)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+lowest_assigned_rank <- function(row, ranks) {
+  vals <- row[ranks]
+  vals <- vals[!is.na(vals) & vals != ""]
+  if (length(vals) == 0) return(NA_character_)
+  tail(vals, 1)
+}
+```
+
+## Seed
+```{r}
+set.seed(631)
+```
+
+
+# Read data
+
+## Raw phyloseq object from DTU
+```{r}
+path_to_raw_data <- # here goes path to raw data
+load(glue("{path_to_raw_data}/merged.phyloseq_object_rdp_v18.RData"))
+
+data_raw <- phy@otu_table %>% as.data.frame() %>% as_tibble(rownames = "Sequencing_ID")
+tax_raw  <- phy@tax_table %>% as.data.frame() %>% as_tibble(rownames = "ASV")
+```
+
+
+## Mapping file (maps sequencing_IDs and)
+```{r}
+mapping <- readRDS(glue("{rds_dir}/003_mapping_sequencing_info.rds"))
+```
+
+# Clean data
+## Substitute the sequencing IDs by the sample IDs
+```{r}
+data <- data_raw %>% 
+  left_join(mapping %>% select(Sequencing_ID, Sample_ID, Subject_ID), by = "Sequencing_ID") %>% 
+  select(Sample_ID, Subject_ID, Sequencing_ID, everything())
+
+data_raw %>% dim() # 547 x 1549 (1 ID column)
+data     %>% dim() # 547 x 1551 (3 ID columns)
+```
+
+## Create a taxonomic annotation file
+```{r}
+ranks <- tax_raw %>% select(-ASV) %>% as.data.frame() %>% colnames()
+
+taxonomic_annotation <- tax_raw %>%  
+  rowwise() %>%
+  mutate(
+    closest_tax = case_when(
+      !is.na(Genus) & !is.na(Species) ~
+        paste(Genus, Species),
+      
+      !is.na(Genus) & is.na(Species) ~
+        paste(Genus, "sp."),
+      
+      is.na(Genus) ~
+        paste("Unclassified", lowest_assigned_rank(pick(all_of(ranks)), ranks))
+      
+    ), .after = "ASV"
+  ) %>%
+  ungroup() %>% 
+  mutate(genus_or_closest = case_when(
+    is.na(Genus) ~ closest_tax,
+    TRUE ~ Genus
+  ),
+  .after = "Genus") %>% 
+  mutate(family_or_closest = case_when(
+    is.na(Family) ~ closest_tax,
+    TRUE ~ Family
+  ),
+  .after = "Family"
+  )
+```
+
+
+
+
+# Process data
+## 1) Filter samples: remove non-biological samples, samples with < 10000 total reads
+```{r}
+# Identify non-biological samples
+data %>% nrow() # 547 samples
+
+data %>% 
+  filter(str_detect(Sequencing_ID, "Mock") |
+           str_detect(Sequencing_ID, "Water") | 
+           str_detect(Sequencing_ID, "Tag") ) %>% 
+  nrow() ## 77 non-biological samples
+
+non_bio_samples <- data %>% 
+  filter(is.na(Subject_ID)) %>% 
+  pull(Sequencing_ID)
+
+non_bio_samples %>% length() # 77
+
+
+# Identify samples < 10000 total reads
+samples_low_reads <- mapping %>%
+  select(Sequencing_ID, Subject_ID, Reads) %>% 
+  filter(Reads < 10000, !is.na(Subject_ID)) %>% 
+  pull(Sequencing_ID)
+
+samples_low_reads %>% length() # 99
+
+# Filter samples
+data_step_1 <- data %>% 
+    filter(! Sequencing_ID %in% non_bio_samples,
+           ! Sequencing_ID %in% samples_low_reads)
+
+
+data_step_1 %>% dim() # 371 x 1551 (3 ID columns)
+```
+
+## 2) Filter ASVs: remove mitochondria/chloroplasts and singletons/doubletons
+```{r}
+# Identify mitochondria/chloroplast ASVs
+mit_chlor_asv <- tax_raw %>% 
+  filter(str_detect(Class, "Chloroplast") | str_detect(Family, "mitochondria") | str_detect(Phylum, "Cyanobacteria/Chloroplast")) %>%
+  pull(ASV)
+
+mit_chlor_asv %>% length() # 6
+
+# Identify singletons/doubletons
+single_doubletons_asv <- data_step_1 %>% 
+  select(contains("ASV")) %>% 
+  mutate(across(everything(), ~ifelse(. > 0, TRUE, FALSE))) %>% 
+  colSums() %>% 
+  enframe(name = "ASV", value = "samples_detected") %>% 
+  filter(samples_detected <= 2) %>% 
+  pull(ASV)
+
+single_doubletons_asv %>% length() # 1341
+
+
+# In case we consider only removing singletons
+singletons_asv <- data_step_1 %>%
+  select(contains("ASV")) %>%
+  mutate(across(everything(), ~ifelse(. > 0, TRUE, FALSE))) %>%
+  colSums() %>%
+  enframe(name = "ASV", value = "samples_detected") %>%
+  filter(samples_detected <= 1) %>%
+  pull(ASV)
+
+singletons_asv %>% length() # 280
+
+
+data_step_2 <- data_step_1 %>%
+    select(everything(),
+           -any_of(mit_chlor_asv),
+           # -any_of(single_doubletons_asv),
+           -any_of(singletons_asv),
+           )
+
+data_step_2 %>% dim() 
+# 371 x 210 (3 ID columns) if doubletons filtered out,
+# or 371 x 1266 if singletons filtered out
+```
+
+## 3) Rarefaction and rel abu
+```{r}
+# Non-rarefied counts
+asv_counts <- data_step_2 %>% 
+  select(Sample_ID, everything(), -Subject_ID, -Sequencing_ID)
+
+asv_counts %>% dim() # 371 x 1264
+
+
+# Non-rarefied relative abundances
+asv_relabu <- asv_counts %>% 
+    mutate(
+    across(
+      -Sample_ID,
+      ~ .x / rowSums(across(-Sample_ID)) * 100
+    )
+  )
+
+asv_relabu %>% dim() # 371 x 1264
+asv_relabu %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be 100
+
+
+# Rarefied counts
+asv_rar_counts <- vegan::rrarefy(
+  asv_counts %>% 
+    select(-Sample_ID) %>%
+    as.data.frame(),
+  # minimum total number of reads across samples (after ASV filtering)
+  sample = asv_counts %>%
+    select(-Sample_ID) %>% 
+    rowSums() %>% 
+    min()
+  ) %>%
+  as_tibble() %>%
+  bind_cols(Sample_ID = asv_counts$Sample_ID) %>% 
+  relocate(Sample_ID, .before = 1)
+
+asv_rar_counts %>% dim() # 371 x 1264
+asv_rar_counts %>% select(-Sample_ID) %>% rowSums() %>% unique() # if one single number above 10000 is shown, it worked
+
+
+
+# Rarefied relative abundances
+asv_rar_relabu <- asv_rar_counts %>% 
+    mutate(
+    across(
+      -Sample_ID,
+      ~ .x / rowSums(across(-Sample_ID)) * 100
+    )
+  )
+
+asv_rar_relabu %>% dim() # 371 x 1264
+asv_rar_relabu %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be 100
+```
+
+## 4) Aggregate at higher taxonomic levels
+### 4.1) gGenus level
+```{r}
+### for those ASVs unclassified as genus level, label them at "Unclassified + lowest-taxonomic-rank-assigned"
+
+
+## 1) Genus counts
+genus_counts <- 
+  asv_counts %>% 
+  # Transpose data
+  column_to_rownames("Sample_ID") %>% 
+  as.matrix() %>% 
+  t() %>% 
+  as.data.frame() %>%
+  as_tibble(rownames = "ASV") %>% 
+  left_join(taxonomic_annotation %>%
+              select(ASV, genus_or_closest),
+            by = "ASV") %>%
+  select(ASV, genus_or_closest, everything()) %>% 
+  # Aggregate counts
+  select(-ASV) %>% 
+  group_by(genus_or_closest) %>% 
+  summarise(across(everything(), sum, na.rm = TRUE)) %>% 
+  # Transpose data back
+  column_to_rownames("genus_or_closest") %>%
+  as.data.frame() %>%
+  t() %>% 
+  as_tibble(rownames = "Sample_ID") %>% 
+  select(Sample_ID, !contains("Unclassified"), contains("Unclassified"))
+
+genus_counts %>% dim() # 371 x 205
+genus_counts %>% colnames() 
+genus_counts %>% select(contains("Unclassified")) %>% colnames() %>% length() # 45 unclassified taxa
+204-45
+# 204 taxa: 159 genera, 45 unclassified taxa
+
+## 2) Genus rel abu
+genus_relabu <- genus_counts %>% 
+    mutate(
+    across(
+      -Sample_ID,
+      ~ .x / rowSums(across(-Sample_ID)) * 100
+    )
+  )
+
+genus_relabu %>% dim() # 371 x 205
+genus_relabu %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be 100
+
+
+## 3) Genus rarefied counts
+genus_rar_counts <- asv_rar_counts %>% 
+  # Transpose data
+  column_to_rownames("Sample_ID") %>% 
+  as.matrix() %>% 
+  t() %>% 
+  as.data.frame() %>%
+  as_tibble(rownames = "ASV") %>% 
+  left_join(taxonomic_annotation %>%
+              select(ASV, genus_or_closest),
+            by = "ASV") %>%
+  select(ASV, genus_or_closest, everything()) %>% 
+  # Aggregate counts
+  select(-ASV) %>% 
+  group_by(genus_or_closest) %>% 
+  summarise(across(everything(), sum, na.rm = TRUE)) %>% 
+  # Transpose data back
+  column_to_rownames("genus_or_closest") %>%
+  as.data.frame() %>%
+  t() %>% 
+  as_tibble(rownames = "Sample_ID") %>% 
+  select(Sample_ID, !contains("Unclassified"), contains("Unclassified"))
+
+genus_rar_counts %>% dim() # 371 x 205
+genus_rar_counts %>% colnames() 
+genus_rar_counts %>% select(contains("Unclassified")) %>% colnames() %>% length() # 45 unclassified taxa
+204-45
+# 204 taxa: 159 genera, 45 unclassified taxa
+genus_rar_counts %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be the same number > 10000 as above (10079)
+
+
+## 4) Genus rarefied rel abu
+genus_rar_relabu <- genus_rar_counts %>% 
+    mutate(
+    across(
+      -Sample_ID,
+      ~ .x / rowSums(across(-Sample_ID)) * 100
+    )
+  )
+
+genus_rar_relabu %>% dim() # 371 x 205
+genus_rar_relabu %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be 100
+```
+
+## 4.2) Family level
+```{r}
+### for those ASVs unclassified as genus level, label them at "Unclassified + lowest-taxonomic-rank-assigned"
+
+## 1) family counts
+family_counts <- 
+  asv_counts %>% 
+  # Transpose data
+  column_to_rownames("Sample_ID") %>% 
+  as.matrix() %>% 
+  t() %>% 
+  as.data.frame() %>%
+  as_tibble(rownames = "ASV") %>% 
+  left_join(taxonomic_annotation %>%
+              select(ASV, family_or_closest),
+            by = "ASV") %>%
+  select(ASV, family_or_closest, everything()) %>% 
+  # Aggregate counts
+  select(-ASV) %>% 
+  group_by(family_or_closest) %>% 
+  summarise(across(everything(), sum, na.rm = TRUE)) %>% 
+  # Transpose data back
+  column_to_rownames("family_or_closest") %>%
+  as.data.frame() %>%
+  t() %>% 
+  as_tibble(rownames = "Sample_ID") %>% 
+  select(Sample_ID, !contains("Unclassified"), contains("Unclassified"))
+
+family_counts %>% dim() # 371 x 75
+family_counts %>% colnames() 
+family_counts %>% select(contains("Unclassified")) %>% colnames() %>% length() # 18 unclassified taxa
+75-18
+# 75 taxa: 57 families, 18 unclassified taxa
+
+## 2) family rel abu
+family_relabu <- family_counts %>% 
+    mutate(
+    across(
+      -Sample_ID,
+      ~ .x / rowSums(across(-Sample_ID)) * 100
+    )
+  )
+
+family_relabu %>% dim() # 371 x 75
+family_relabu %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be 100
+
+
+## 3) family rarefied counts
+family_rar_counts <- asv_rar_counts %>% 
+  # Transpose data
+  column_to_rownames("Sample_ID") %>% 
+  as.matrix() %>% 
+  t() %>% 
+  as.data.frame() %>%
+  as_tibble(rownames = "ASV") %>% 
+  left_join(taxonomic_annotation %>%
+              select(ASV, family_or_closest),
+            by = "ASV") %>%
+  select(ASV, family_or_closest, everything()) %>% 
+  # Aggregate counts
+  select(-ASV) %>% 
+  group_by(family_or_closest) %>% 
+  summarise(across(everything(), sum, na.rm = TRUE)) %>% 
+  # Transpose data back
+  column_to_rownames("family_or_closest") %>%
+  as.data.frame() %>%
+  t() %>% 
+  as_tibble(rownames = "Sample_ID") %>% 
+  select(Sample_ID, !contains("Unclassified"), contains("Unclassified"))
+
+family_rar_counts %>% dim() # 371 x 75
+family_rar_counts %>% colnames() 
+family_rar_counts %>% select(contains("Unclassified")) %>% colnames() %>% length() # 18 unclassified taxa
+75-18
+# 75 taxa: 57 families, 18 unclassified taxa
+family_rar_counts %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be the same number > 10000 as above (10079)
+
+
+## 4) family rarefied rel abu
+family_rar_relabu <- family_rar_counts %>% 
+    mutate(
+    across(
+      -Sample_ID,
+      ~ .x / rowSums(across(-Sample_ID)) * 100
+    )
+  )
+
+family_rar_relabu %>% dim() # 371 x 75
+family_rar_relabu %>% select(-Sample_ID) %>% rowSums() %>% unique() # should be 100
+```
+
+## 5) Calculate alpha diversity
+Note: this is done from the rarefied relative abundances, at ASV level
+```{r}
+alpha_div <- tibble(
+  Sample_ID = asv_rar_counts$Sample_ID,
+  richness  = rowSums(asv_rar_counts %>% select(-Sample_ID) > 0),
+  shannon   = vegan::diversity(
+    asv_rar_counts %>% select(-Sample_ID) %>% as.data.frame(),
+    "shannon")
+  )
+
+alpha_div %>% dim()
+```
+
+## 6) Calculate subject-means
+```{r}
+### ASV files
+asv_counts_means <- asv_counts %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+
+asv_relabu_means <- asv_relabu %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+asv_relabu_means %>% select(-Subject_ID) %>% rowSums() %>% unique() # should be 100
+
+asv_rar_counts_means <- asv_rar_counts %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+
+asv_rar_relabu_means <- asv_rar_relabu %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+asv_rar_relabu_means %>% select(-Subject_ID) %>% rowSums() %>% unique() # should be 100
+
+### Genus files
+genus_counts_means <- genus_counts %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+
+genus_relabu_means <- genus_relabu %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+genus_relabu_means %>% select(-Subject_ID) %>% rowSums() %>% unique() # should be 100
+
+genus_rar_counts_means <- genus_rar_counts %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+
+genus_rar_relabu_means <- genus_rar_relabu %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+genus_rar_relabu_means %>% select(-Subject_ID) %>% rowSums() %>% unique() # should be 100
+
+
+
+### Family files
+family_counts_means <- family_counts %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+
+family_relabu_means <- family_relabu %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+family_relabu_means %>% select(-Subject_ID) %>% rowSums() %>% unique() # should be 100
+
+family_rar_counts_means <- family_rar_counts %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+
+family_rar_relabu_means <- family_rar_relabu %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+family_rar_relabu_means %>% select(-Subject_ID) %>% rowSums() %>% unique() # should be 100
+
+
+
+
+### Alpha diversity
+alpha_div_means <- alpha_div %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused") %>% 
+  group_by(Subject_ID) %>% 
+  summarize(across(where(is.numeric), ~mean(., na.rm = TRUE))) %>% 
+  arrange(Subject_ID) %>% 
+  mutate(across(everything(), ~ifelse(. == "NaN", NA, .)))
+```
+
+
+# Save clean/processed data
+```{r}
+saveRDS(asv_counts,
+        glue("{rds_dir}/{params$markdown_id}_asv_counts.rds"))
+saveRDS(asv_relabu,
+        glue("{rds_dir}/{params$markdown_id}_asv_relabu.rds"))
+saveRDS(asv_rar_counts,
+        glue("{rds_dir}/{params$markdown_id}_asv_rar_counts.rds"))
+saveRDS(asv_rar_relabu,
+        glue("{rds_dir}/{params$markdown_id}_asv_rar_relabu.rds"))
+
+
+saveRDS(genus_counts,
+        glue("{rds_dir}/{params$markdown_id}_genus_counts.rds"))
+saveRDS(genus_relabu,
+        glue("{rds_dir}/{params$markdown_id}_genus_relabu.rds"))
+saveRDS(genus_rar_counts,
+        glue("{rds_dir}/{params$markdown_id}_genus_rar_counts.rds"))
+saveRDS(genus_rar_relabu,
+        glue("{rds_dir}/{params$markdown_id}_genus_rar_relabu.rds"))
+
+
+saveRDS(family_counts,
+        glue("{rds_dir}/{params$markdown_id}_family_counts.rds"))
+saveRDS(family_relabu,
+        glue("{rds_dir}/{params$markdown_id}_family_relabu.rds"))
+saveRDS(family_rar_counts,
+        glue("{rds_dir}/{params$markdown_id}_family_rar_counts.rds"))
+saveRDS(family_rar_relabu,
+        glue("{rds_dir}/{params$markdown_id}_family_rar_relabu.rds"))
+
+
+
+saveRDS(asv_counts_means,
+        glue("{rds_dir}/{params$markdown_id}_asv_counts_means.rds"))
+saveRDS(asv_relabu_means,
+        glue("{rds_dir}/{params$markdown_id}_asv_relabu_means.rds"))
+saveRDS(asv_rar_counts_means,
+        glue("{rds_dir}/{params$markdown_id}_asv_rar_counts_means.rds"))
+saveRDS(asv_rar_relabu_means,
+        glue("{rds_dir}/{params$markdown_id}_asv_rar_relabu_means.rds"))
+
+
+saveRDS(genus_counts_means,
+        glue("{rds_dir}/{params$markdown_id}_genus_counts_means.rds"))
+saveRDS(genus_relabu_means,
+        glue("{rds_dir}/{params$markdown_id}_genus_relabu_means.rds"))
+saveRDS(genus_rar_counts_means,
+        glue("{rds_dir}/{params$markdown_id}_genus_rar_counts_means.rds"))
+saveRDS(genus_rar_relabu_means,
+        glue("{rds_dir}/{params$markdown_id}_genus_rar_relabu_means.rds"))
+
+
+
+saveRDS(family_counts_means,
+        glue("{rds_dir}/{params$markdown_id}_family_counts_means.rds"))
+saveRDS(family_relabu_means,
+        glue("{rds_dir}/{params$markdown_id}_family_relabu_means.rds"))
+saveRDS(family_rar_counts_means,
+        glue("{rds_dir}/{params$markdown_id}_family_rar_counts_means.rds"))
+saveRDS(family_rar_relabu_means,
+        glue("{rds_dir}/{params$markdown_id}_family_rar_relabu_means.rds"))
+
+
+
+saveRDS(alpha_div,
+        glue("{rds_dir}/{params$markdown_id}_alpha_diversity.rds"))
+saveRDS(alpha_div_means,
+        glue("{rds_dir}/{params$markdown_id}_alpha_diversity_means.rds"))
+
+
+
+
+saveRDS(taxonomic_annotation,
+        glue("{rds_dir}/{params$markdown_id}_taxonomic_annotation.rds"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

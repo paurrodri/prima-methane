@@ -1,0 +1,679 @@
+---
+title: "Linear models and heatmaps: gut factors, HMP vs LMP; and adjusting for transit time"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "121" # "121_MTT2" means methane TT 2group
+  methane_group: "Methane_group" # "Methane_TT_2group"
+  stool_ph_var: "stool_ph_raw"
+  threshold_p: 0.05
+  threshold_fdr: 0.1
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(stringr)
+library(flextable)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_all_filename)
+meta_means_raw <- readRDS(meta_means_filename)
+```
+
+
+# Prepare data
+
+## Select variables of interest
+```{r}
+gut_vars <- c(
+  "bloating", "diarrhea", "constipation", "git_symptoms",
+  "stool_freq", "bristol_scale", "bacterial_load_wet",
+  params$stool_ph_var, "stool_energy", "stool_moisture", "cn_ratio")
+
+gut_varnames <- list("Bloating", "Diarrhoea", "Constipation", "GIT symptoms",
+                   "Stool frequency", "Stool consistency", "Microbial load",
+                   "Stool pH", "Energy density", "Stool moisture", "C:N ratio")
+
+gut_var_mapping <- gut_varnames
+names(gut_var_mapping) <- gut_vars
+
+
+tt_vars  <- c("GET", "SBTT", "CTT", "SLBTT", "WGTT")
+
+meta <- meta_raw %>% 
+  select(Subject_ID, !!sym(params$methane_group), all_of(gut_vars), all_of(tt_vars)) %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+meta_means <- meta_means_raw %>% 
+  select(Subject_ID, !!sym(params$methane_group), all_of(gut_vars), all_of(tt_vars)) %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+```
+
+## Get total HMP and LMP numbers
+```{r}
+# for means' data
+group_counts_means <- meta_means %>% group_by(!!sym(params$methane_group)) %>% count()
+total_hmp_means <- group_counts_means[[1,2]]
+total_lmp_means <- group_counts_means[[2,2]]
+total_all_means <- nrow(meta_means)
+
+
+# for long data
+group_counts <- meta %>% group_by(!!sym(params$methane_group)) %>% count()
+total_hmp <- group_counts[[1,2]]
+total_lmp <- group_counts[[2,2]]
+total_all <- nrow(meta)
+
+```
+
+## Prepare combinations for adjustment
+```{r}
+combi <- expand_grid(y = gut_vars,
+                     adjusted_by = tt_vars)
+```
+
+
+# Linear modelling
+## Set which vars are subject-level (others are treated longitudinally)
+```{r}
+vars_for_means <- c("stool_energy", "cn_ratio") # subject-level
+```
+
+## No adjustment
+```{r}
+x <- params$methane_group
+
+res_unadj <- map(gut_vars, function(y){
+  
+  # If subject-level variable, do a LM on the means data, without Subject ID
+  if (y %in% vars_for_means){
+    
+    model_data <- meta_means %>%
+        dplyr::select(all_of(c(x, y)), Subject_ID) %>% 
+        tidyr::drop_na()
+    
+    subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+    n_hmp <- subject_counts[[1,2]]
+    n_lmp <- subject_counts[[2,2]]
+    n_total <- nrow(model_data)
+    
+    f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "`"))
+    
+    model <- lm(f, data = model_data)
+        
+    pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+    coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+      
+    log2FC <- coef / log(2)
+      
+    se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+    ci_low  <- coef - 1.96 * se
+    ci_high <- coef + 1.96 * se
+  
+    ci_log <- coef + c(-1, 1) * 1.96 * se
+    ci_log2 <- ci_log / log(2)
+      
+
+    tibble::tibble(response = gut_var_mapping[[y]],
+               predictor = x,
+               test = "linear model",
+               adjusted_by = "",
+               n_total = glue("{n_total}/{total_all_means}"),
+               n_HMP = glue("{n_hmp}/{total_hmp_means}"),
+               n_LMP = glue("{n_lmp}/{total_lmp_means}"),
+               estimate = coef,
+               log2FC = coef,
+               CI_log2FC_lower = ci_log2[1],
+               CI_log2FC_upper = ci_log2[2],
+               p = pval,
+               beta_confounder = NA,
+               p_confounder = NA
+               )
+    
+        
+  # If longitudinal variable, use a linear mixed model
+  } else {
+  
+    model_data <- meta %>%
+        dplyr::select(all_of(c(x, y)), Subject_ID) %>% 
+        tidyr::drop_na()
+    
+    subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+    n_hmp <- subject_counts[[1,2]]
+    n_lmp <- subject_counts[[2,2]]
+    n_total <- nrow(model_data)
+    
+    f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "` + (1 | Subject_ID)"))
+    model <- lmerTest::lmer(f, data = model_data)
+    
+    # extract pval
+    pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+    # extract log2fold change and CI
+    coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+    log2FC <- coef / log(2)
+    
+    # extract 95% CI
+    se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+    ci_log <- coef + c(-1, 1) * 1.96 * se
+    ci_log2 <- ci_log / log(2)
+    
+    tibble::tibble(response = gut_var_mapping[[y]],
+                   predictor = x,
+                   test = "Linear model",
+                   adjusted_by = "Subject_ID",
+                   n_total = glue("{n_total}/{total_all}"),
+                   n_HMP = glue("{n_hmp}/{total_hmp}"),
+                   n_LMP = glue("{n_lmp}/{total_lmp}"),
+                   estimate = coef,
+                   log2FC = log2FC,
+                   CI_log2FC_lower = ci_log2[1],
+                   CI_log2FC_upper = ci_log2[2],
+                   p = pval,
+                   beta_confounder = NA,
+                   p_confounder = NA
+                   )
+  }
+
+}) %>% bind_rows() %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p")
+```
+
+## Adjustment for transit time
+```{r}
+x <- params$methane_group
+
+res_adj <-
+  pmap(combi, function(y, adjusted_by){
+    
+    # If subject-level variable, do a LM on the means data, without Subject ID
+    if (y %in% vars_for_means){
+      
+      model_data <- meta_means %>%
+          dplyr::select(Subject_ID, all_of(c(x, y, adjusted_by))) %>% 
+          tidyr::drop_na()
+      
+      subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+      n_hmp <- subject_counts[[1,2]]
+      n_lmp <- subject_counts[[2,2]]
+      n_total <- nrow(model_data)
+    
+      f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "` + `", adjusted_by, "`"))
+      model <- lm(f, data = model_data)
+      
+      # extract pval
+      pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+      
+      # extract log2fold change and CI
+      coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+      log2FC <- coef / log(2)
+      
+      # extract 95% CI
+      se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+      ci_log <- coef + c(-1, 1) * 1.96 * se
+      ci_log2 <- ci_log / log(2)
+    
+      coef_tt <- as.numeric(summary(model)$coefficients[3, "Estimate"])
+      pval_tt <- as.numeric(summary(model)$coefficients[3, "Pr(>|t|)"])
+    
+    
+      tibble::tibble(response = gut_var_mapping[[y]],
+                     predictor = x,
+                     test = "Linear model",
+                     adjusted_by = glue("{adjusted_by}"),
+                     n_total = glue("{n_total}/{total_all_means}"),
+                     n_HMP = glue("{n_hmp}/{total_hmp_means}"),
+                     n_LMP = glue("{n_lmp}/{total_lmp_means}"),
+                    estimate = coef,
+                     log2FC = log2FC,
+                     CI_log2FC_lower = ci_log2[1],
+                     CI_log2FC_upper = ci_log2[2],
+                     p = pval,
+                     beta_confounder = coef_tt,
+                    p_confounder = pval_tt
+      )
+  
+    # If longitudinal variable, use a linear mixed model
+    } else {
+  
+      model_data <- meta %>%
+          dplyr::select(Subject_ID, all_of(c(x, y, adjusted_by))) %>% 
+          tidyr::drop_na()
+      
+      subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+      n_hmp <- subject_counts[[1,2]]
+      n_lmp <- subject_counts[[2,2]]
+      n_total <- nrow(model_data)
+    
+      f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "` + `", adjusted_by, "` + (1 | Subject_ID)"))
+      model <- lmerTest::lmer(f, data = model_data)
+      
+      # extract pval
+      pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+      
+      # extract log2fold change and CI
+      coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+      log2FC <- coef / log(2)
+      
+      # extract 95% CI
+      se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+      ci_log <- coef + c(-1, 1) * 1.96 * se
+      ci_log2 <- ci_log / log(2)
+    
+      coef_tt <- as.numeric(summary(model)$coefficients[3, "Estimate"])
+      pval_tt <- as.numeric(summary(model)$coefficients[3, "Pr(>|t|)"])
+    
+    
+      tibble::tibble(response = gut_var_mapping[[y]],
+                     predictor = x,
+                     test = "Linear mixed model",
+                     adjusted_by = glue("{adjusted_by}, Subject_ID"),
+                     n_total = glue("{n_total}/{total_all}"),
+                     n_HMP = glue("{n_hmp}/{total_hmp}"),
+                     n_LMP = glue("{n_lmp}/{total_lmp}"),
+                    estimate = coef,
+                     log2FC = log2FC,
+                     CI_log2FC_lower = ci_log2[1],
+                     CI_log2FC_upper = ci_log2[2],
+                     p = pval,
+                     beta_confounder = coef_tt,
+                    p_confounder = pval_tt
+                     )
+    }
+
+}) %>% bind_rows() %>% 
+  group_by(adjusted_by) %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup()
+```
+
+## Combine all results
+```{r}
+res <- bind_rows(res_unadj, res_adj) %>% 
+  arrange(response) %>% 
+    # assign a variable type label
+  mutate(response_type = case_when(
+    response %in% c("Bloating", "Diarrhoea", "GIT symptoms", "Constipation") ~ "GIT symptoms",
+    response %in% c("Stool frequency", "Stool consistency") ~ "Def. patterns",
+    response %in% c("Microbial load", "Energy density", "Stool pH", "Stool moisture", "C:N ratio") ~ "Stool characteristics"
+  )) %>% 
+  mutate(response_type = factor(response_type, levels = c(
+    "GIT symptoms", "Def. patterns", "Stool characteristics"
+  ))) %>% 
+  # readjust multiple testing
+  group_by(adjusted_by, response_type) %>% 
+   mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup() %>% 
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+```
+
+## Extra: p- and q-values for load and energy
+```{r}
+res %>% 
+  filter(adjusted_by %in% c("", "Subject_ID"),
+         response %in% c("Stool moisture", 
+                         "Microbial load",
+                         "Energy density")) %>% 
+  select(response, adjusted_by, p, FDR) %>% 
+  flextable()
+```
+
+
+# Heatmap of results
+- do not use fold changes, but standardized β. This works directly with coef/estimate because the y var was standardized before fitting the model. 
+- only show adjustment for WGTT
+
+## Prepare data and aesthetics for heatmap
+```{r}
+res_data <- 
+  res %>% 
+  mutate(response = case_when(
+    response == "GIT symptoms" ~ "Overall symptoms",
+    TRUE ~ response
+  )) %>% 
+   filter(adjusted_by ==  "Subject_ID" |
+          adjusted_by ==  "" |
+         str_detect(adjusted_by, "WGTT")
+         ) %>% 
+  # assign a variable type label
+  mutate(response_type = case_when(
+    response %in% c("Bloating",  "Diarrhoea", "GIT symptoms", "Overall symptoms", "Constipation") ~ "GIT symptoms",
+    response %in% c("Stool frequency", "Stool consistency") ~ "Def. patterns",
+    response %in% c("Microbial load", "Energy density", "Stool pH", "Stool moisture", "C:N ratio") ~ "Stool characteristics"
+  )) %>% 
+  mutate(response_type = factor(response_type, levels = c(
+    "GIT symptoms", "Def. patterns", "Stool characteristics"
+  ))) %>% 
+  # readjust multiple testing
+  group_by(adjusted_by, response_type) %>% 
+   mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup() %>% 
+  mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR") %>%
+  # rename adjustment label
+  mutate(adjustment_label = case_when(
+    str_detect(adjusted_by, "^Subject_ID$") ~ "Minimal adjustment",
+     adjusted_by == "" ~ "Minimal adjustment",
+    str_detect(adjusted_by, "WGTT") ~ "Adjusted for WGTT",
+  ),
+  adjustment_label = factor(adjustment_label, levels = c(
+    "Minimal adjustment", 
+    "Adjusted for WGTT"
+  ))) %>% 
+  # assign a "significance label"
+  mutate(
+    significance_type = case_when(
+      FDR < params$threshold_fdr ~ "fdr",
+      p < params$threshold_p & FDR >= params$threshold_fdr ~ "nominal",
+      TRUE ~ "ns"
+    )
+  ) %>% 
+  # reorder responses
+  mutate(response = factor(response, levels = c(
+    "Overall symptoms",
+    "Bloating",
+    "Constipation",
+    "Diarrhoea",
+    "Stool frequency",
+    "Stool consistency",
+    "Stool moisture",
+    "Stool pH",
+    "C:N ratio",
+    "Microbial load",
+    "Energy density"
+  )))
+  
+  
+  
+  # color gradients
+gc_color_max_value <- res_data %>% 
+  pull(estimate) %>%
+  abs() %>% max(na.rm = TRUE) %>% 
+  paulaR::ceiling_signif(digits = 0)
+
+gc_fill_scale <- scale_fill_gradient2(
+  low = study_colors$methane[[1]],
+  mid = "white",
+  high = study_colors$methane[[2]],
+  midpoint = 0,
+  limits = c(-gc_color_max_value, gc_color_max_value),
+  breaks = c(-gc_color_max_value, 0, gc_color_max_value),  
+  guide = guide_colorbar(title.position = "top"),
+  name = "Standardized β",
+ labels = c(
+    glue("{-gc_color_max_value}\nhigher\nin HMP"),
+    "0",
+    glue("{gc_color_max_value}\nhigher\nin LMP")
+  )
+)
+
+fontsize <- 16
+fontsize_x <- 14
+```
+
+## Horizontal heatmap
+```{r}
+hm <- 
+  res_data %>% 
+  ggplot(aes(x = response,
+             y = adjustment_label)) +
+
+  # heatmap tiles
+  geom_tile(aes(fill = estimate), color = "grey20") +
+
+  # circles nominal P
+  geom_point(
+    data = res_data %>% filter(significance_type == "nominal"),
+    aes(x = response, 
+        y = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = NA,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  
+  # circles FDR
+  geom_point(
+    data = res_data %>% filter(significance_type == "fdr"),
+    aes(x = response, 
+        y = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = "black",                   
+    inherit.aes = FALSE,
+    show.legend = TRUE
+  ) +
+
+  # tile color scale
+  gc_fill_scale +
+
+  # shape scale
+  scale_shape_manual(
+    name = "",
+    values = c(nominal = 1, fdr = 21),
+    labels = c(nominal = "p < 0.05", fdr = "q < 0.1")
+  ) +
+  
+  facet_wrap(~ response_type,
+             scales = "free_x",
+             space = "free_x") +
+
+  labs(y = "HMP vs LMP", 
+        x = NULL) +
+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  
+  paulaR::white_theme(font_size = fontsize) +
+  theme(
+    axis.text.x = element_text(angle = -45,
+                               hjust = 1,
+                               size = fontsize_x,
+                               color = "black"),
+    axis.title.y = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 4,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "left-rotated",  
+            halign = 0.5,       
+            valign = 0.5        
+          ),
+    axis.text.y = element_text(color = "black"),
+    legend.title = element_text(size = fontsize-4, face = "bold"),
+    legend.text = element_text(size = fontsize-4),
+    legend.position = "bottom",
+    legend.location = "horizontal",
+    panel.grid = element_blank()
+  )
+  
+hm 
+```
+
+## Vertical heatmap
+```{r}
+hm_vertical <-
+  res_data %>% 
+  ggplot(aes(y = response,
+             x = adjustment_label)) +
+
+  # heatmap tiles
+  geom_tile(aes(fill = estimate), color = "grey20") +
+
+  # circles nominal P
+  geom_point(
+    data = res_data %>% filter(significance_type == "nominal"),
+    aes(y = response, 
+        x = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = NA,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  
+  # circles FDR
+  geom_point(
+    data = res_data %>% filter(significance_type == "fdr"),
+    aes(y = response, 
+        x = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = "black",                   
+    inherit.aes = FALSE,
+    show.legend = TRUE
+  ) +
+
+  # tile color scale
+  gc_fill_scale +
+
+  # shape scale
+  scale_shape_manual(
+    name = "",
+    values = c(nominal = 21, fdr = 21),
+    labels = c(nominal = "p < 0.05", fdr = "q < 0.1")
+  ) +
+  
+  facet_wrap(~ response_type,
+             scales = "free_y",
+              space = "free_y",
+             strip.position = "right") +
+
+  labs(x = "HMP vs LMP", 
+        y = NULL) +
+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  
+  paulaR::white_theme(font_size = fontsize) +
+  
+
+theme(
+    axis.text.y = element_text(size = 12,
+                               color = "black"),
+    axis.title.x.top = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize - 4,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "upright",  
+            halign = 0.5,       
+            valign = 0.5        
+          ),
+    strip.text.y.right = element_text(size = 12),
+    axis.text.x = element_text(color = "black", size = 12, angle = -30, hjust = 1),
+    legend.title = element_text(size = fontsize-4, face = "bold"),
+    legend.text = element_text(size = fontsize-4),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.location = "vertical",
+    panel.grid = element_blank()
+  )
+
+hm_vertical
+```
+
+
+# Save results
+
+
+## Linear models
+```{r}
+saveRDS(res,
+           glue("{rds_dir}/{params$markdown_id}_gut_factors_methane_group_tt_linear_models.rds"))
+
+
+saveRDS(res,
+           glue("{rds_dir}/{params$markdown_id}_gut_factors_methane_group_tt_linear_models.rds"))
+```
+
+## Heatmaps
+```{r}
+format <- "png"
+
+hm
+ggsave(glue("{fig_dir}/{params$markdown_id}_results_heatmap_horizontal.{format}"),
+       bg = "white",
+       width = 8,
+       height = 4,
+       dpi = 400
+       )
+saveRDS(hm, glue("{rds_dir}/{params$markdown_id}_results_heatmap_horizontal.rds"))
+
+hm_vertical
+ggsave(glue("{fig_dir}/{params$markdown_id}_results_heatmap_vertical.{format}"),
+       bg = "white",
+       width = 3,
+       height = 8.5,
+       dpi = 400
+       )
+
+saveRDS(hm_vertical, glue("{rds_dir}/{params$markdown_id}_results_heatmap_vertical.rds"))
+```
+
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

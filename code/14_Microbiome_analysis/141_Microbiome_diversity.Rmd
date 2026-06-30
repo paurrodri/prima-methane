@@ -1,0 +1,776 @@
+---
+title: "Alpha and beta diversity"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "141" # "141_MTT2" means methane TT 2group
+  methane_group: "Methane_group"
+  
+  microbiome_filename: asv_rar_relabu_filename
+  beta_distance: "bray"
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(vegan)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+## General aesthetics
+```{r}
+fontsize <- 14
+```
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_all_filename)
+```
+
+## Microbiome (μb) data
+```{r}
+ub_raw     <- readRDS(get(params$microbiome_filename))
+```
+
+
+# Prepare data
+## Meta and microbiome data sets
+```{r}
+meta <- meta_raw %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+ub   <- ub_raw %>% 
+  filter(Sample_ID %in% meta$Sample_ID)
+```
+
+## Extract variables of interest for linear models
+```{r}
+tt_vars <- c("GET", "SBTT", "CTT", "SLBTT", "WGTT")
+
+other_vars_of_interest <- c("fasting_CH4",
+                            "smithii_inv_ct",
+                            "archaea_inv_ct",
+                            "stool_energy",
+                            "bacterial_load_wet",
+                            "ph_proximal_colon")
+```
+
+## Prepare microbiome data for beta diversity
+```{r}
+ub_df     <- ub %>% 
+  column_to_rownames("Sample_ID") %>%
+  as.data.frame()
+
+
+## Sample/subject lists for PERMANOVA
+sample_list <- tibble(
+  Sample_ID = ub$Sample_ID
+) %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1)) %>% 
+  left_join(meta %>% 
+              select(Subject_ID, !!sym(params$methane_group)) %>% 
+              distinct(),
+            by = "Subject_ID")
+
+subject_list <- meta %>% 
+  select(Subject_ID, !!sym(params$methane_group)) %>% 
+  distinct()
+```
+
+
+# Alpha diversity
+## Calculate alpha diversity
+```{r}
+alpha_div <- tibble(
+  Sample_ID = ub$Sample_ID,
+  Subject_ID = str_split_i(Sample_ID, "-", 1), 
+  richness  = rowSums(ub %>% select(-Sample_ID) > 0),
+  shannon   = vegan::diversity(
+    ub %>% select(-Sample_ID) %>% as.data.frame(),
+    "shannon")
+  ) %>% 
+  left_join(meta %>%
+              select(Sample_ID, params$methane_group,
+                     all_of(tt_vars),
+                     all_of(other_vars_of_interest)),
+            by = "Sample_ID") %>% 
+  arrange(Sample_ID)
+```
+
+## Figure: compare alpha diversity between groups (longitudinal)
+
+### Richness
+```{r}
+x <- params$methane_group
+y <- "richness"
+title <- "Richness"
+
+
+ylim <- c(0, paulaR::ceiling_signif(max(alpha_div[[y]], na.rm = T), 1))
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1], ylim[2], 50)
+
+  test <- 
+        lmerTest::lmer(as.formula(paste0("`", y, "` ~ `", x, "` + (1|Subject_ID)")),
+                              alpha_div) %>%
+        broom.mixed::tidy() %>% 
+        filter(term == paste0(params$methane_group, "LMP")) %>% 
+        select(estimate, p = p.value) %>% 
+        mutate(label = case_when(
+                p < 0.001 ~ "p < 0.001",
+                p > 0.1   ~ "p > 0.1",
+                TRUE ~ glue("p = {round(p, 3)}")
+                ),
+               y.position = ppos,
+               group1 = "LMP", 
+               group2 = "HMP"
+               )
+
+fig_richness <- 
+  alpha_div %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 stroke = 1.2,
+                 height = 0,
+                 alpha = 0.1) +
+     scale_fill_manual(values = study_colors$methane) +
+     stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+     ) +
+     labs(title = title,
+          y = "",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_richness
+```
+
+### Shannon
+```{r}
+x <- params$methane_group
+y <- "shannon"
+title <- "Shannon index"
+
+
+ylim <- c(0, paulaR::ceiling_signif(max(alpha_div[[y]], na.rm = T), 0))
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1], ylim[2], 1)
+
+
+test <- 
+        lmerTest::lmer(as.formula(paste0("`", y, "` ~ `", x, "` + (1|Subject_ID)")),
+                              alpha_div) %>%
+        broom.mixed::tidy() %>% 
+        filter(term == paste0(params$methane_group, "LMP")) %>% 
+        select(estimate, p = p.value) %>% 
+        mutate(label = case_when(
+                p < 0.001 ~ "p < 0.001",
+                p > 0.1   ~ "p > 0.1",
+                TRUE ~ glue("p = {round(p, 3)}")
+                ),
+               y.position = ppos, 
+               group1 = "LMP", 
+               group2 = "HMP"
+               )
+
+fig_shannon <- 
+  alpha_div %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.2) +
+     scale_fill_manual(values = study_colors$methane) +
+     stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+     ) +
+     labs(title = title,
+          y = "",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_shannon
+```
+
+
+## Linear models (group comparison, longitudinal)
+
+### Adjustment only by Subject_ID as random effect
+```{r}
+x <- params$methane_group
+
+alpha_vars <- c("richness", "shannon")
+
+total_all <- nrow(alpha_div)
+total_hmp <- nrow(alpha_div %>% filter(!!sym(params$methane_group) == "HMP"))
+total_lmp <- nrow(alpha_div %>% filter(!!sym(params$methane_group) == "LMP"))
+
+lm_alpha_unadj <- map(alpha_vars, function(y){
+
+  model_data <- alpha_div %>%
+      dplyr::select(all_of(c(x, y, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+  
+  subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+  n_hmp <- subject_counts[[1,2]]
+  n_lmp <- subject_counts[[2,2]]
+  n_total <- nrow(model_data)
+  
+  f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "` + (1|Subject_ID)"))
+  model <- lmerTest::lmer(f, data = model_data)
+    
+    
+  # extract pval
+  pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+  
+  # extract log2fold change and CI
+  coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+  log2FC <- coef / log(2)
+  
+  # extract 95% CI
+  se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_log <- coef + c(-1, 1) * 1.96 * se
+  ci_log2 <- ci_log / log(2)
+
+  
+  tibble::tibble(response = y,
+                 predictor = x,
+                 adjusted_by = "(1|Subject_ID)",
+                 n_total = glue("{n_total}/{total_all}"),
+                 n_HMP = glue("{n_hmp}/{total_hmp}"),
+                 n_LMP = glue("{n_lmp}/{total_lmp}"),
+                 beta_estimate = coef,
+                 log2FC = log2FC,
+                 CI_log2FC_lower = ci_log2[1],
+                 CI_log2FC_upper = ci_log2[2],
+                 p = pval,
+                 estimate_confounder = NA,
+                 p_confounder = NA
+                 )
+
+}) %>% bind_rows() %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+```
+
+### Adjustment by transit time as fixed effect and Subject_ID as random effect
+```{r}
+x <- params$methane_group
+
+combi <- expand_grid(y = alpha_vars,
+                     fixed_effect = tt_vars)
+
+lm_alpha_adj <-
+  pmap(combi, function(y, fixed_effect){
+  
+    model_data <- alpha_div %>%
+      dplyr::select(all_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      tidyr::drop_na()
+  
+  subject_counts <- model_data %>% group_by(!!sym(x)) %>% count()
+  n_hmp <- subject_counts[[1,2]]
+  n_lmp <- subject_counts[[2,2]]
+  n_total <- nrow(model_data)
+
+  f <- as.formula(paste0("scale(`", y, "`) ~ `", x, "` + `", fixed_effect, "` + (1|Subject_ID)"))
+  model <- lmerTest::lmer(f, data = model_data)
+  
+  # extract pval
+  pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+  
+  # extract log2fold change and CI
+  coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+  log2FC <- coef / log(2)
+  
+  # extract 95% CI
+  se <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_log <- coef + c(-1, 1) * 1.96 * se
+  ci_log2 <- ci_log / log(2)
+  
+  coef_tt <- as.numeric(summary(model)$coefficients[3, "Estimate"])
+  pval_tt <- as.numeric(summary(model)$coefficients[3, "Pr(>|t|)"])
+
+
+  tibble::tibble(response = y,
+                 predictor = x,
+                 adjusted_by = glue("{fixed_effect} + (1|Subject_ID)"),
+                 n_total = glue("{n_total}/{total_all}"),
+                 n_HMP = glue("{n_hmp}/{total_hmp}"),
+                 n_LMP = glue("{n_lmp}/{total_lmp}"),
+                  beta_estimate = coef,
+                 log2FC = log2FC,
+                 CI_log2FC_lower = ci_log2[1],
+                 CI_log2FC_upper = ci_log2[2],
+                 p = pval,
+                 estimate_confounder = coef_tt,
+                 p_confounder = pval_tt
+                 )
+
+}) %>% bind_rows() %>% 
+  group_by(adjusted_by) %>% 
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>% 
+  ungroup() %>%
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+```
+
+### Combine all results
+```{r}
+lm_alpha <- bind_rows(lm_alpha_unadj, lm_alpha_adj) %>% 
+  arrange(response)
+
+lm_alpha %>% 
+  select(-predictor) %>% 
+   mutate(across(where(is.numeric), round, 3)) %>% 
+  flextable()
+```
+
+
+## Linear models (correlation to vars of interest)
+```{r}
+# variables with subject-level means
+vars_for_means <- c("fasting_CH4",
+                    "smithii_inv_ct",
+                    "archaea_inv_ct",
+                    "stool_energy",
+                    "ph_proximal_colon") 
+
+
+combi_cor <- expand_grid(
+  x = other_vars_of_interest,
+  y = c("richness", "shannon"),
+)
+
+
+cor_alpha <- purrr::pmap(combi_cor, function(x, y){
+    
+  # If subject-level variable, run LM without subject adjustment
+ if (x %in% vars_for_means) {
+
+       n_total <- alpha_div$Subject_ID %>% unique() %>% length()
+          
+       # compute means
+       model_data <- alpha_div %>%
+         dplyr::select(any_of(c(x, y, "Subject_ID"))) %>% 
+         group_by(Subject_ID) %>% 
+         summarise(across(all_of(c(x, y)),
+                          ~ mean(.x, na.rm = TRUE)))  %>%
+         na.omit() 
+       
+       n_tested <- nrow(model_data)
+          
+       # note both alpha/response variable and predictor variable are scaled
+       f <- as.formula(paste0("scale(`", y, "`) ~ scale(`", x, "`)"))
+
+       random_effect <- ""
+       model <- lm(f, data = model_data)
+        
+       pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+       coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+       se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+       ci_low  <- coef - 1.96 * se
+       ci_high <- coef + 1.96 * se
+        
+       output <- tibble::tibble(
+         response = y,
+         predictor = x,
+         test = "linear model",
+         adjusted_by = glue(""),
+         n_total = glue("{n_tested}/{n_total}"),
+         estimate_type = "standardized beta coefficient",
+         estimate = coef,
+         CI_estimate_lower = ci_low,
+         CI_estimate_upper = ci_high,
+         p = pval 
+        )
+       
+       
+      # If longitudinal variable, run linear mixed model adjusting for subject
+   } else {
+      
+      model_data <- alpha_div %>%
+              dplyr::select(any_of(c(x, y, "Subject_ID"))) %>% 
+              na.omit() 
+      
+      n_total <- nrow(alpha_div)
+      n_tested <- nrow(model_data)
+      
+      # note both alpha/response variable and predictor variable are scaled
+      f <- as.formula(paste0("scale(`", y, "`) ~ scale(`", x, "`) + (1|Subject_ID)"))
+  
+      random_effect <- "(1|Subject_ID)"
+      model <- lmerTest::lmer(f, data = model_data)
+
+      pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+      coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+      se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+      ci_low  <- coef - 1.96 * se
+      ci_high <- coef + 1.96 * se
+  
+      output <- tibble::tibble(
+         response = y,
+         predictor = x,
+         test = "linear mixed model",
+         adjusted_by = glue("{random_effect}"),
+         n_total = glue("{n_tested}/{n_total}"),
+         estimate_type = "standardized beta coefficient",
+         estimate = coef,
+         CI_estimate_lower = ci_low,
+         CI_estimate_upper = ci_high,
+         p = pval
+                     )
+   }
+     
+     return(output)
+    
+    
+  }) %>% bind_rows() %>% 
+  group_by(adjusted_by) %>%
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>%
+  ungroup() %>% 
+  mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+
+
+# see results
+cor_alpha %>%
+  arrange(predictor) %>%
+  select(predictor, response, estimate, p, FDR) %>% 
+  mutate(estimate = round(estimate,3),
+         p = round(p, 4),
+         FDR = round(FDR, 4)) %>% 
+  flextable()
+```
+
+
+## Some numbers for paper
+```{r}
+lm_alpha %>% 
+  filter(adjusted_by %in% c("(1|Subject_ID)")) %>% 
+  select(response, adjusted_by, beta_estimate, p, FDR) %>% 
+   mutate(across(where(is.numeric), round, 5)) %>% 
+  flextable()
+
+
+# might be needed
+cor_alpha %>%
+  arrange(predictor) %>%
+  select(predictor, response, estimate, p, FDR) %>% 
+  mutate(estimate = round(estimate,3),
+         p = round(p, 4),
+         FDR = round(FDR, 4)) %>% 
+  flextable()
+```
+
+
+
+# Beta diversity
+## Compute beta diversity and PCoA
+```{r}
+# Distances
+dist_mat <- vegdist(ub_df, method = params$beta_distance)
+
+# PCoA
+pcoa <- cmdscale(dist_mat, k = nrow(ub_df)-1, eig = TRUE)
+
+positive_axes <- which(pcoa$eig > 0)
+
+
+pcoa_tib <- 
+  pcoa$points[, positive_axes] %>% 
+  as_tibble(rownames = "Sample_ID",
+            .name_repair = "minimal") %>%
+  setNames(c("Sample_ID",
+             paste0("PCo", seq_len(length(positive_axes)))
+             )) %>%
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1),
+         .after = "Sample_ID") %>% 
+  left_join(meta %>% 
+              select(Sample_ID, !!sym(params$methane_group)),
+            by = "Sample_ID")
+
+# Variance explained
+var_exp <- pcoa$eig / sum(pcoa$eig)
+pc1_lab <- glue("PCo1 ({round(var_exp[1] * 100, 1)} %)")
+pc2_lab <- glue("PCo2 ({round(var_exp[2] * 100, 1)} %)")
+
+
+# Subject centroids
+# using all PCos with positive eigenvalues
+subject_centroids_tib <- pcoa_tib %>%
+  group_by(Subject_ID, !!sym(params$methane_group)) %>%
+  summarise(across(starts_with("PC"), mean)) %>% 
+  ungroup()
+```
+
+## PERMANOVA
+
+### On the distances between the centroids
+```{r}
+centroid_dist_mat <- 
+    subject_centroids_tib %>% 
+    select(Subject_ID, starts_with("PC")) %>% 
+    column_to_rownames("Subject_ID") %>% 
+    as.data.frame() %>% 
+    dist()
+
+# Necessary check
+stopifnot(all.equal(subject_list$Subject_ID,
+                    subject_centroids_tib$Subject_ID))
+
+
+formula <- stringr::str_c(
+  "centroid_dist_mat ~",
+  params$methane_group
+) %>%
+  stats::as.formula()
+
+set.seed(631)
+
+adonis_centroids <- adonis2(
+  formula,
+  data = subject_list,
+  permutations = 1000
+)
+
+adonis_centroids_table <- 
+  tibble(
+  Term = rownames(adonis_centroids),
+  R2 = adonis_centroids$R2,
+  F = adonis_centroids$F,
+  p_value = adonis_centroids$`Pr(>F)`
+)
+
+adonis_centroids_table %>% flextable()
+
+permanova_label <- glue(
+  "R^2 == {round(adonis_centroids_table$R2[1], 2)} ~ ',' ~ P == {round(adonis_centroids_table$p_value[1], 3)}"
+)
+```
+
+## Plot subject centroids (PCoA)
+```{r}
+fig_pcoa <- 
+  ggplot() +
+  # individual samples
+  geom_point(
+    data = pcoa_tib,
+    aes(x = PCo1,
+        y = PCo2,
+        color = !!sym(params$methane_group)),
+    alpha = 0.2,
+    size = 1
+  ) +
+  # subject centroids
+  geom_point(
+    data = subject_centroids_tib,
+    aes(x = PCo1, y = PCo2,
+        color = !!sym(params$methane_group),
+        group = !!sym(params$methane_group)),
+    size = 3
+  ) +
+  # ellipse
+  stat_ellipse(
+    data = subject_centroids_tib,
+    aes(x = PCo1,
+        y = PCo2,
+        color = !!sym(params$methane_group),
+        group = !!sym(params$methane_group)
+        ),
+    type = "norm",
+    linetype = 2
+  ) +
+  annotate("text", 
+           x = -0.4,
+           y = 0.4,
+          label = permanova_label,
+          hjust = 0,
+          parse = T
+          ) +
+  scale_color_manual(values = c(study_colors$methane[[1]],
+                                study_colors$methane[[2]])) +
+  labs(
+    x = pc1_lab,
+    y = pc2_lab,
+    color = "",
+    title = ""
+  ) +
+  paulaR::white_theme(font_size = fontsize + 2) +
+    theme(plot.title = element_text(size = fontsize - 4),
+          legend.position = c(0.98, 0.03),
+          legend.justification = c("right", "bottom"),
+          legend.title = element_blank(),
+          legend.background = element_rect(fill = "white")
+          )
+
+fig_pcoa
+```
+
+
+
+# Save results
+
+## Alpha and beta div data
+```{r}
+saveRDS(alpha_div,
+        glue("{rds_dir}/{params$markdown_id}_alpha_div.rds"))
+
+saveRDS(dist_mat,
+        glue("{rds_dir}/{params$markdown_id}_{params$beta_distance}_distance_matrix.rds"))
+
+
+saveRDS(pcoa_tib,
+        glue("{rds_dir}/{params$markdown_id}_{params$beta_distance}_pcoa_table.rds"))
+
+saveRDS(subject_centroids_tib,
+        glue("{rds_dir}/{params$markdown_id}_{params$beta_distance}_subject_centroids_table.rds"))
+```
+
+## Subfigures, as images
+```{r}
+format <- "png" # png # pdf
+
+fig_richness
+ggsave(glue("{fig_dir}/{params$markdown_id}_boxplot_richness.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 400)
+
+fig_shannon
+ggsave(glue("{fig_dir}/{params$markdown_id}_boxplot_shannon.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 400)
+
+fig_pcoa
+ggsave(glue("{fig_dir}/{params$markdown_id}_beta_div_pcoa.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 400)
+```
+
+## Subfigures, as plot rds
+```{r}
+saveRDS(fig_richness,
+        glue("{rds_dir}/{params$markdown_id}_boxplot_richness.rds"))
+
+saveRDS(fig_shannon,
+        glue("{rds_dir}/{params$markdown_id}_boxplot_shannon.rds"))
+
+
+saveRDS(fig_pcoa,
+        glue("{rds_dir}/{params$markdown_id}_microbiome_pcoa.rds"))
+```
+
+
+## Linear model results
+```{r}
+write.xlsx(lm_alpha,
+           glue("{tab_dir}/{params$markdown_id}_alpha_div_methane_tt_linear_models.xlsx"))
+
+lm_alpha %>% 
+  saveRDS(glue("{rds_dir}/{params$markdown_id}_alpha_div_methane_tt_linear_models.rds"))
+
+
+write.xlsx(cor_alpha,
+           glue("{tab_dir}/{params$markdown_id}_alpha_div_correlation_linear_models.xlsx"))
+
+cor_alpha %>% 
+  saveRDS(glue("{rds_dir}/{params$markdown_id}_alpha_div_correlation_linear_models.rds"))
+```
+
+## PERMANOVA results
+```{r}
+write.xlsx(adonis_centroids_table,
+           glue("{tab_dir}/{params$markdown_id}_permanova_subject_centroids.xlsx"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

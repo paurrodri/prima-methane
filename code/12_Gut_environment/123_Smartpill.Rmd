@@ -1,0 +1,776 @@
+---
+title: "SmartPill data: pH and TT across HMP and LMP"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "123" # "123_MTT2" means methane TT 2group
+  methane_group: "Methane_group" # "Methane_TT_2group"
+  stool_ph_var: "stool_ph_raw" 
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+count_how_many_zero_per_column <- function (data){
+    sapply(data, function(x) sum(x == 0, na.rm = T))
+}
+
+get_rows_with_all_na <- function(data, vars) {
+  data %>%
+    dplyr::filter(dplyr::if_all(all_of(vars),
+                                is.na))
+}
+
+scientific_notation_fun <- function(x) {
+  parse(text = gsub(
+    "e\\+?", "%*%10^",
+    formatC(x, format = "e", digits = 1)
+  ))
+}
+```
+
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_means_filename)
+```
+
+
+# Prepare data
+
+## Extract variables of interest
+```{r}
+fig_ph_vars <- c("ph_duodenum",
+  "ph_small_bowel",
+  "ph_proximal_colon",
+  "ph_distal_colon",
+  "ph_sigmoid_colon",
+  "ph_rectum")
+
+fig_ph_varnames <- c("Duodenum",
+                    "Small intestine",
+                    "Proximal colon",
+                    "Distal colon",
+                    "Sigmoid colon",
+                    "Rectum")
+
+fig_tt_vars <- c("GET", "SBTT", "CTT", "SLBTT", "WGTT")
+
+fig_tt_varnames <- c("Gastric emptying time",
+  "Small bowel transit time",
+                    "Colonic transit time",
+                    "Intestinal transit time",
+                    "Whole-gut transit time")
+
+other_vars <- c("ph_colon",
+                params$stool_ph_var # fecal pH
+                )
+
+other_varnames <- c("Colonic pH",
+                    "Fecal pH") 
+
+
+all_vars_mapping <- c(fig_ph_varnames, 
+                      fig_tt_varnames, 
+                      other_varnames)
+
+names(all_vars_mapping) <- c(fig_ph_vars, 
+                      fig_tt_vars, 
+                      other_vars)
+
+
+meta <- meta_raw %>% 
+  select(Subject_ID,
+         !!sym(params$methane_group),
+         all_of(c(fig_ph_vars,
+                  fig_tt_vars,
+                  other_vars))
+         ) %>% 
+  filter(!is.na(!!sym(params$methane_group)))
+
+
+paulaR::count_how_many_na_per_column(meta)
+# 11 subjects with all missing data (did not agree to smartpill)
+# 14-15 subjects without colonic pH
+# 20 subjects without WGTT
+
+# Identify the 11 subjects without smartpill data at all
+ids_no_smartpill <- meta %>%
+  get_rows_with_all_na(fig_ph_vars) %>% 
+  pull(Subject_ID)
+```
+
+
+## Aesthetics, general
+```{r}
+fontsize <- 14
+```
+
+# Figure pH trajectories
+## Prep data for fig pH trajectories
+```{r}
+fig_ph_data <- meta %>%
+  select(Subject_ID,
+         !!sym(params$methane_group),
+         fig_ph_vars) %>% 
+  # Remove only the 11 subjects with no smartpill data at all
+   filter(!if_all(c(fig_ph_vars), is.na)) %>% 
+  rename(!!!setNames(fig_ph_vars, fig_ph_varnames)) %>% 
+  pivot_longer(-c(Subject_ID, !!sym(params$methane_group)),
+               names_to = "segment", 
+               values_to = "pH") %>% 
+  filter(!is.na(pH)) %>% 
+  mutate(segment = factor(segment,
+                          levels = fig_ph_varnames),
+         !!sym(params$methane_group) := factor(!!sym(params$methane_group)))
+
+fig_ph_mean_data <- fig_ph_data %>%
+  group_by(!!sym(params$methane_group), segment) %>%
+  summarise(mean_pH = mean(pH, na.rm = TRUE)) %>% 
+  filter(segment %in% fig_ph_varnames)
+
+fig_ph_pval <- fig_ph_data %>% 
+  group_by(segment) %>%
+  summarise(
+    p = wilcox.test(pH ~ !!sym(params$methane_group),
+                    exact = F)$p.value) %>%
+    mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "",
+    TRUE ~ glue("* (p = {round(p, 3)})")
+    )) %>% 
+  mutate(y_position = max(fig_ph_data$pH, na.rm = TRUE) - 1.3
+)
+
+fig_ph_pval
+```
+
+## Plot fig pH trajectories
+```{r}
+ylim <- c(paulaR::trunc_signif(min(meta %>% select(fig_ph_vars), na.rm = T), 0),
+          paulaR::ceiling_signif(max(meta %>% select(fig_ph_vars), na.rm = T), 0))
+breaks <- seq(ylim[1], ylim[2], 1)
+
+fig_ph <- 
+fig_ph_data %>% 
+  ggplot(aes(x = segment, 
+             y = pH,
+             group = Subject_ID, 
+             color = !!sym(params$methane_group))) +
+  geom_point(alpha = 0.6) +  
+  geom_line(aes(group = Subject_ID), alpha = 0.3)  +  
+  geom_line(data = fig_ph_mean_data, 
+            aes(group = !!sym(params$methane_group),
+                y = mean_pH),
+            size = 2.5) +  
+  geom_text(
+    data = fig_ph_pval,
+    aes(
+      x = segment,
+      y = y_position,
+      label = label
+    ),
+    inherit.aes = FALSE,
+    angle = 45,
+    size = 5,
+    vjust = 0.5,
+    hjust = 0
+  ) + 
+  scale_color_manual(values = c(study_colors$methane[[1]], 
+                                study_colors$methane[[2]])) +
+  scale_y_continuous(limits = ylim,
+                     breaks = breaks) +
+  labs(x = "", y = "pH", color = "") +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(axis.text.x = element_text(angle = 30,
+                                   hjust = 1),
+        legend.position = c(0.98, 0.03),
+        legend.justification = c("right", "bottom"),
+        legend.title = element_blank(),
+        legend.background = element_rect(fill = "white")
+        ) 
+
+fig_ph
+```
+
+# Boxplots transit time
+## Boxplot SBTT
+```{r}
+x <- params$methane_group
+y <- "SBTT"
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1))
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.9)
+breaks <- seq(ylim[1], ylim[2], 5)
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      meta,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = ppos
+    )
+
+fig_SBTT <- 
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = all_vars_mapping[[y]],
+          y = "Hours",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_SBTT
+```
+
+## Boxplot CTT
+```{r}
+x <- params$methane_group
+y <- "CTT"
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1)+10)
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.95)
+breaks <- seq(ylim[1], ylim[2], 20)
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      meta,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = ppos
+    )
+
+fig_CTT <- 
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = all_vars_mapping[[y]],
+          y = "Hours",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_CTT
+```
+
+## Boxplot SLBTT
+```{r}
+x <- params$methane_group
+y <- "SLBTT"
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1)+10)
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.95)
+breaks <- seq(ylim[1], ylim[2], 20)
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      meta,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = ppos
+    )
+
+fig_SLBTT <- 
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = all_vars_mapping[[y]],
+          y = "Hours",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_SLBTT
+```
+
+## Boxplot WGTT
+```{r}
+x <- params$methane_group
+y <- "WGTT"
+ylim <- c(0, paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 1))
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.95)
+breaks <- seq(ylim[1], ylim[2], 20)
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      meta,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = ppos
+    )
+
+fig_WGTT <- 
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = all_vars_mapping[[y]],
+          y = "Hours",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_WGTT
+```
+
+# Other figures
+## Boxplot prox colonic pH
+```{r}
+x <- params$methane_group
+y <- "ph_proximal_colon"
+ylim <- c(paulaR::trunc_signif(min(meta[[y]], na.rm = T), 0), 
+          paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 0))
+ppos <- 8
+breaks <- seq(ylim[1], ylim[2], 0.5)
+
+test <- compare_means(as.formula(paste(y, "~", x)),
+                      meta,
+                      "wilcox.test",
+                      exact = FALSE) %>%
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = ppos
+    )
+
+fig_pcph <- 
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = "Proximal colonic pH",
+          y = "Hours",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+fig_pcph
+```
+
+## Other pH/TT boxplots
+```{r}
+other_pH_tt_boxplots <- map(other_vars, function(y){
+  
+  x <- params$methane_group
+  
+  # ylim <- c(paulaR::trunc_signif(min(meta[[y]], na.rm = T), 0), 
+  #           paulaR::ceiling_signif(max(meta[[y]], na.rm = T), 0))
+  ylim <- c(5, 9)
+  breaks <- seq(ylim[1], ylim[2], 1)
+    
+
+  
+  ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.95)
+
+
+  test <- compare_means(as.formula(paste0("`", y, "`~", x)),
+                        meta,
+                        "wilcox.test",
+                        exact = FALSE) %>%
+    mutate(label = case_when(
+      p < 0.001 ~ "p < 0.001",
+      p > 0.1 ~ "p > 0.1",
+      TRUE ~ glue("p = {round(p, 3)}")
+      ),
+      y.position = ppos
+      )
+
+  meta %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 3,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.6) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(title = all_vars_mapping[[y]],
+          y = "Hours",
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+}) %>% wrap_plots(ncol = length(other_vars))
+
+other_pH_tt_boxplots
+```
+
+## Correlation breath methane and WGTT
+```{r}
+# this figure, incl R and P, can be found in Rmd 110
+# to reproduce supplementary figure, make sure to use in 110's params$methane_group = "Methane_TT_2group"
+```
+
+
+# Extra numbers for paper
+
+## pH values Wilcoxon stat tests, repeated with FDR
+```{r}
+ph_pval <- fig_ph_data %>% 
+  group_by(segment) %>%
+  summarise(
+mean_HMP = mean(pH[!!sym(params$methane_group) == "HMP"], na.rm = TRUE),
+    sd_HMP   = sd(pH[!!sym(params$methane_group) == "HMP"], na.rm = TRUE),
+    
+    mean_LMP = mean(pH[!!sym(params$methane_group) == "LMP"], na.rm = TRUE),
+    sd_LMP   = sd(pH[!!sym(params$methane_group) == "LMP"], na.rm = TRUE),
+  p = wilcox.test(pH ~ !!sym(params$methane_group),
+                    exact = F)$p.value) %>%
+  mutate(FDR = p.adjust(p, method = "BH"))  %>%
+    mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR") %>% 
+  rename("pH segment" = segment)
+
+ph_pval %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  flextable()
+```
+
+## Transit time Wilcoxon stat tests, repeated with FDR
+```{r}
+tt_pval <- map(fig_tt_vars, function(y){
+     
+    x <- params$methane_group
+    
+    varname  <- all_vars_mapping[[y]]  
+    
+    res <- compare_means(as.formula(paste0("`", y, "` ~ `", x, "`")),
+                            meta,
+                            "wilcox.test",
+                            exact = FALSE) %>% 
+      rename("var" = `.y.`) %>% 
+      select(-`p.adj`, -`p.format`, -`p.signif`) %>% 
+      relocate(method, .after = "group2") %>% 
+      mutate(varname = varname, .after = "var") %>% 
+      mutate(
+      mean_HMP = mean(meta[[y]][meta[[x]] == "HMP"], na.rm = TRUE),
+      sd_HMP   = sd(meta[[y]][meta[[x]] == "HMP"], na.rm = TRUE),
+
+      mean_LMP = mean(meta[[y]][meta[[x]] == "LMP"], na.rm = TRUE),
+      sd_LMP   = sd(meta[[y]][meta[[x]] == "LMP"], na.rm = TRUE)
+    )
+
+    
+    return(res)
+}) %>% bind_rows() %>% 
+  mutate(FDR = p.adjust(p, method = "BH")) %>% 
+  mutate(signif_p = case_when(
+      p < 0.001 ~ "***",
+      p < 0.01  ~ "**",
+      p < 0.05  ~ "*",
+      TRUE            ~ ""
+  )) %>% 
+  mutate(signif_FDR = case_when(
+    FDR < 0.001 ~ "***",
+    FDR < 0.01  ~ "**",
+    FDR < 0.1 ~ "*",
+    TRUE ~ ""
+  )) %>% 
+  select("Variable" = varname,
+           mean_HMP, sd_HMP,
+    mean_LMP, sd_LMP,
+         p, FDR, contains("signif"))
+
+tt_pval %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  flextable()
+```
+
+## Numbers WGTT & &CTT & ITT & prox colonic pH HMP vs LMP
+```{r}
+meta %>% 
+  select(!!sym(params$methane_group), WGTT, SLBTT, CTT, ph_proximal_colon) %>% 
+  group_by(!!sym(params$methane_group)) %>% 
+  summarise(mean_WGTT = mean(WGTT, na.rm = T),
+            sd_WGTT = sd(WGTT, na.rm = T),
+            mean_CTT = mean(CTT, na.rm = T),
+            sd_CTT = sd(CTT, na.rm = T),
+            mean_ITT = mean(SLBTT, na.rm = T),
+            sd_ITT = sd(SLBTT, na.rm = T),
+            mean_prox_colon_pH = mean(ph_proximal_colon, na.rm = T),
+            sd_prox_colon_pH = sd(ph_proximal_colon, na.rm = T)
+            ) %>% 
+  mutate(across(where(is.numeric), round, 1)) %>%
+  flextable()
+```
+
+
+
+# Save results
+
+
+## pH and TT figures, as images
+```{r}
+format <- "png" # png # pdf
+
+fig_ph
+ggsave(glue("{fig_dir}/{params$markdown_id}_fig_ph.{format}"),
+       bg = "white",
+       width = 6,
+       height = 4,
+       dpi = 300)
+
+fig_SBTT
+ggsave(glue("{fig_dir}/{params$markdown_id}_fig_SBTT.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+
+fig_CTT
+ggsave(glue("{fig_dir}/{params$markdown_id}_fig_CTT.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+
+fig_SLBTT
+ggsave(glue("{fig_dir}/{params$markdown_id}_fig_SLBTT.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+
+fig_WGTT
+ggsave(glue("{fig_dir}/{params$markdown_id}_fig_WGTT.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+
+fig_pcph
+ggsave(glue("{fig_dir}/{params$markdown_id}_fig_proximal_colonic_pH.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+```
+
+## pH and TT figures, as rds
+```{r}
+saveRDS(fig_ph, glue("{rds_dir}/{params$markdown_id}_fig_ph.rds"))
+
+saveRDS(fig_SBTT, glue("{rds_dir}/{params$markdown_id}_fig_SBTT.rds"))
+
+saveRDS(fig_CTT, glue("{rds_dir}/{params$markdown_id}_fig_CTT.rds"))
+
+saveRDS(fig_SLBTT, glue("{rds_dir}/{params$markdown_id}_fig_SLBTT.rds"))
+
+saveRDS(fig_WGTT, glue("{rds_dir}/{params$markdown_id}_fig_WGTT.rds"))
+```
+
+
+## Wilcox tests (pH and transit time)
+```{r}
+write.xlsx(ph_pval, 
+            glue("{tab_dir}/{params$markdown_id}_pH_methane_groups_wilcoxon.xlsx"))
+
+
+write.xlsx(tt_pval, 
+            glue("{tab_dir}/{params$markdown_id}_transit_time_methane_groups_wilcoxon.xlsx"))
+
+ph_pval %>% 
+  saveRDS(glue("{rds_dir}/{params$markdown_id}_ph_methane_group_wilcoxon.rds"))
+tt_pval %>% 
+  saveRDS(glue("{rds_dir}/{params$markdown_id}_tt_methane_group_wilcoxon.rds"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

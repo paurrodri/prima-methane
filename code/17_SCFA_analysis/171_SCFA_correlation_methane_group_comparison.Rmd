@@ -1,0 +1,1783 @@
+---
+title: "SCFA plasma-fecal correlation, methane group comparison, and correlation to continuous vars"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "171_dry_long" # can be: "171_long" or "171_dry_long"
+  
+  fecal_scfa_filename: "fecal_scfa_dry_filename" # "fecal_scfa_filename" or "fecal_scfa_dry_filename" 
+  
+  methane_group: "Methane_group"
+  
+  cor_method: "spearman"
+  
+  is_mb_means: FALSE # must be FALSE
+  
+  pseudocount: 1e-6 # potentially needed for log-transformation
+  threshold_p: 0.05
+  threshold_fdr: 0.1
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(glue)
+library(purrr)
+library(patchwork)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(openxlsx)
+library(flextable)
+library(broom)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+## General aesthetics
+```{r}
+fontsize <- 14
+```
+
+# Read data
+## Meta
+```{r}
+meta_raw <- readRDS(meta_all_filename)
+```
+
+## SCFA data
+```{r}
+plasma_raw     <- readRDS(plasma_scfa_filename)
+fecal_raw      <- readRDS(get(params$fecal_scfa_filename))
+# extra
+glp1_raw       <- readRDS(plasma_glp1_filename)
+```
+
+# Explore data
+## General
+```{r}
+plasma_raw %>% colnames()
+fecal_raw %>% colnames()
+glp1_raw %>% colnames()
+
+plasma_raw %>% dim() 
+fecal_raw %>% dim() 
+glp1_raw %>% dim() 
+
+plasma_raw %>% mutate(Day = str_split_i(Sample_ID, "-", 2)) %>% group_by(Day) %>% count() # days 2 and 9
+fecal_raw %>% mutate(Day = str_split_i(Sample_ID, "-", 2)) %>% group_by(Day) %>% count() # days 2,3,4,5,6
+glp1_raw %>% mutate(Day = str_split_i(Sample_ID, "-", 2)) %>% group_by(Day) %>% count() # days 2 and 9
+```
+
+
+# Prepare data
+
+## Add a prefix to the fecal and plasma variables
+```{r}
+plasma <- plasma_raw %>% rename_with(~ paste0("p_", .x), where(is.numeric)) 
+fecal  <- fecal_raw  %>% rename_with(~ paste0("f_", .x), where(is.numeric))
+glp1   <- glp1_raw
+
+# meta - nothing needed
+meta <- meta_raw
+
+# for now only - remove ph from those with smartpill fucked
+subjects_any_na_smartpill <- meta_raw %>% 
+  select(Subject_ID,
+         contains("TT"),
+         -contains("Methane"), -contains("stool")) %>% 
+  paulaR::show_rows_with_na() %>% 
+  pull(Subject_ID) %>% unique()
+
+meta <- meta_raw %>% 
+  mutate(
+    ph_stomach = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_stomach),
+    ph_duodenum = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_duodenum),
+    ph_small_bowel = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_small_bowel),
+    ph_colon = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_colon),
+    ph_proximal_colon = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_proximal_colon),
+    ph_distal_colon = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_distal_colon),
+    ph_sigmoid_colon = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_sigmoid_colon),
+    ph_rectum = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, ph_rectum),
+    GET = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, GET),
+    SBTT = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, SBTT),
+    SLBTT = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, SLBTT),
+    CTT = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, CTT),
+    WGTT = ifelse(Subject_ID %in% subjects_any_na_smartpill, NA, WGTT),
+    
+  )
+```
+
+## Extract variables of interest
+```{r}
+plasma_vars <- plasma %>% select(where(is.numeric)) %>% colnames()
+fecal_vars  <- fecal  %>% select(where(is.numeric)) %>% colnames()
+
+plasma_vars_glp1 <- c(plasma_vars, "glp1")
+fecal_vars_glp1  <- c(fecal_vars,  "glp1")
+
+extra_vars <- c("fasting_CH4",
+                "fasting_H2",
+                "stool_energy",
+                "bacterial_load_wet",
+                "ph_small_bowel",
+                "ph_colon",
+                "ph_proximal_colon",
+                "ph_distal_colon",
+                "ph_sigmoid_colon",
+                "ph_rectum",
+                "smithii_inv_ct", 
+                "archaea_inv_ct")
+
+tt_vars <- c("GET", "SBTT", "CTT", "SLBTT", "WGTT")
+# for now keep it simple
+tt_vars <- tt_vars[4:5]
+
+combi <- expand_grid(
+  x = c(fecal_vars_glp1, extra_vars),
+  y = c(plasma_vars, fecal_vars, "glp1"))
+
+gc_vars <- c(plasma_vars, fecal_vars, "glp1")
+
+combi_gc <- expand_grid(
+  y = gc_vars,
+  fixed_effect = c("", tt_vars)
+)
+
+combi_all <- expand_grid(
+  x = c(fecal_vars_glp1, extra_vars),
+  y = c(plasma_vars, fecal_vars, "glp1"),
+  fixed_effect = c("", tt_vars)
+)
+
+vars_for_means <- c("stool_energy",
+                    "cn_ratio",
+                    "ph_small_bowel",
+                    "ph_colon",
+                    "ph_proximal_colon",
+                    "ph_distal_colon",
+                    "ph_sigmoid_colon",
+                    "ph_rectum",
+                    "fasting_CH4",
+                    "fasting_H2",
+                    "smithii_inv_ct",
+                    "archaea_inv_ct",
+                    "glp1")
+```
+
+## Combine all data sets
+```{r}
+data <- plasma %>% 
+    full_join(fecal,
+              by = "Sample_ID") %>% 
+    full_join(glp1, by = "Sample_ID") %>% 
+    mutate(Subject_ID = str_split_i(Sample_ID , "-", 1),
+           .after = Sample_ID) %>% 
+    left_join(meta %>%
+                select(Sample_ID,
+                       !!sym(params$methane_group),
+                       sex,
+                       all_of(tt_vars),
+                       all_of(extra_vars)) %>%
+                distinct(),
+              by = "Sample_ID") %>% 
+  filter(!is.na(!!sym(params$methane_group))) %>% 
+  arrange(Sample_ID)
+```
+
+
+# 1) Statistical tests
+
+## 1.1) Correlations - longitudinal except for "cross-sectional" variables
+```{r}
+if (!params$is_mb_means){
+
+  
+  cor_res <- pmap(combi_all, function(x, y, fixed_effect){
+    
+
+     if (x == y){
+       output <- tibble::tibble(response = y,
+                    predictor = x,
+                    test = NA,
+                    adjusted_by = NA,
+                    n_total = NA,
+                    estimate_type = NA,
+                    estimate = NA,
+                    estimate_std = NA,
+                    p = NA
+                   )
+
+     } else if (x %in% vars_for_means) {
+       
+       n_total <- data$Subject_ID %>% unique() %>% length()
+       if (fixed_effect == "") {
+                # compute means
+       model_data <- data %>%
+      dplyr::select(any_of(c(x, y, "Subject_ID"))) %>% 
+      group_by(Subject_ID) %>% 
+      summarise(across(all_of(c(x, y)), ~ mean(.x, na.rm = TRUE))) %>% 
+      mutate(!!sym(y) := !!sym(y) + as.numeric(params$pseudocount)) %>% 
+      na.omit() %>% 
+      # transform X already here
+         mutate(!!sym(x) := case_when(
+           x %in% c(plasma_vars, fecal_vars) ~ log(!!sym(x) + as.numeric(params$pseudocount)),
+           TRUE ~ scale(!!sym(x))
+           )) 
+  
+      n_tested <- nrow(model_data)
+         
+         
+         
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "`"))
+        } else {
+          
+      # compute means
+       model_data <- data %>%
+      dplyr::select(any_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      group_by(Subject_ID) %>% 
+      summarise(across(all_of(c(x, y, fixed_effect)), ~ mean(.x, na.rm = TRUE)))  %>%
+      mutate(!!sym(y) := !!sym(y) + as.numeric(params$pseudocount)) %>% 
+      na.omit() %>% 
+      # transform X already here
+         mutate(!!sym(x) := case_when(
+           x %in% c(plasma_vars, fecal_vars) ~ log(!!sym(x) + as.numeric(params$pseudocount)),
+           TRUE ~ scale(!!sym(x))
+           )) 
+  
+      n_tested <- nrow(model_data)
+          
+          
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + scale(`", fixed_effect, "`)"))
+
+        }
+        
+        random_effect <- ""
+        model <- lm(f, data = model_data)
+        
+         pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+      coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+        se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_low  <- coef - 1.96 * se
+  ci_high <- coef + 1.96 * se
+        
+  # extract std beta (in log-transformed units)
+  sd_y <- sd(log(model_data[[y]]), na.rm = TRUE)
+  coef_std <- coef / sd_y
+       
+       
+       
+       output <- tibble::tibble(
+         response = y,
+         predictor = x,
+         test = "linear model",
+         adjusted_by = glue("{fixed_effect}"),
+         n_total = glue("{n_tested}/{n_total}"),
+         estimate_type = "beta coefficient",
+         estimate = coef,
+         estimate_std = coef_std,
+         CI_estimate_lower = ci_low,
+         CI_estimate_upper = ci_high,
+         p = pval )
+       
+       
+       
+     } else {
+        
+      model_data <- data %>%
+      dplyr::select(any_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      mutate(!!sym(y) := !!sym(y) + as.numeric(params$pseudocount)) %>% 
+      na.omit() %>% 
+      # transform X already here
+         mutate(!!sym(x) := case_when(
+           x %in% c(plasma_vars, fecal_vars) ~ log(!!sym(x) + as.numeric(params$pseudocount)),
+           TRUE ~ scale(!!sym(x))
+           )) 
+      
+       n_total <- nrow(data)
+      n_tested <- nrow(model_data)
+    
+  
+      # if only 1 measurement per subject, then do not adjust for subject
+      if (nrow(model_data) == n_distinct(model_data$Subject_ID)){
+        if (fixed_effect == "") {
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "`"))
+        } else {
+          
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + scale(`", fixed_effect, "`)"))
+
+        }
+        
+          random_effect <- ""
+          model <- lm(f, data = model_data)
+           test_label <- "linear model"
+       
+          # linear mixed model 
+      } else {
+        
+        if (fixed_effect == "") {
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + (1|Subject_ID)"))
+
+        } else {
+          
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + scale(`", fixed_effect, "`) + (1|Subject_ID)"))
+
+        }
+
+        random_effect <- "(1|Subject_ID)"
+        model <- lmerTest::lmer(f, data = model_data)
+        test_label <- "linear mixed model"
+      }
+    
+      pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+      coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+        se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+  ci_low  <- coef - 1.96 * se
+  ci_high <- coef + 1.96 * se
+  
+  # extract std beta (in log-transformed units)
+  sd_y <- sd(log(model_data[[y]]), na.rm = TRUE)
+  coef_std <- coef / sd_y
+       
+  
+      
+       
+      output <- tibble::tibble(
+         response = y,
+         predictor = x,
+         test = test_label,
+         adjusted_by = glue("{fixed_effect}, {random_effect}"),
+         n_total = glue("{n_tested}/{n_total}"),
+         estimate_type = "beta coefficient",
+         estimate = coef,
+         estimate_std = coef_std,
+         CI_estimate_lower = ci_low,
+         CI_estimate_upper = ci_high,
+         p = pval
+                     )
+     }
+     
+     return(output)
+    
+    
+  }) %>% bind_rows() %>% 
+  mutate(yx = str_c(response, predictor, sep = "-"),
+         xy = str_c(predictor, response, sep = "-"),
+         ) %>% 
+  filter(yx != xy) %>% 
+  select(-xy, -yx) %>% 
+  mutate(type_response = case_when(
+    str_detect(response, "p_") ~ "plasma",
+    str_detect(response, "f_") ~ "fecal",
+    str_detect(response, "glp1") ~ "glp1",
+    TRUE ~ "stool"
+    ),
+    .after = "response") %>%
+    mutate(type_predictor = case_when(
+    str_detect(predictor, "p_") ~ "plasma",
+    str_detect(predictor, "f_") ~ "fecal",
+    str_detect(predictor, "glp1") ~ "glp1",
+    str_detect(predictor, "ph_") ~ "pH",
+    str_detect(predictor, "fasting_") ~ "breath",
+    str_detect(predictor, "qpcr") ~ "methanogens",
+    str_detect(predictor, "inv_ct") ~ "methanogens",
+    TRUE ~ "stool"
+    ),
+    .after = "predictor") %>%
+  group_by(type_response, type_predictor, adjusted_by) %>%
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>%
+  ungroup() %>% 
+  mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+  
+}
+```
+
+## 1.2) Methane group comparison - longitudinal
+```{r}
+if (!params$is_mb_means){
+  x <- params$methane_group
+  
+  total_all <- nrow(data)
+  total_hmp <- nrow(data %>% filter(!!sym(params$methane_group) == "HMP"))
+  total_lmp <- nrow(data %>% filter(!!sym(params$methane_group) == "LMP"))
+  
+  gc_res <- pmap(combi_gc, function(y, fixed_effect){
+    
+    model_data <- data %>%
+      dplyr::select(any_of(c(x, y, fixed_effect, "Subject_ID"))) %>% 
+      mutate(!!sym(y) := !!sym(y) + as.numeric(params$pseudocount)) %>% 
+      na.omit()
+    
+    subject_counts <- model_data %>%
+      group_by(!!sym(x)) %>% 
+      count()
+
+    n_hmp <- subject_counts[[1,2]]
+    n_lmp <- subject_counts[[2,2]]
+    n_total <- n_lmp + n_hmp
+    n_tested <- nrow(model_data)
+    
+    # if only 1 measurement per subject, then do not adjust for subject
+    if (nrow(model_data) == n_distinct(model_data$Subject_ID)){
+      
+     if (fixed_effect == "") {
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "`"))
+        } else {
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + scale(`", fixed_effect, "`)"))
+        }
+      
+      random_effect <- ""
+      model <- lm(f, data = model_data)
+      model <- lmerTest::lmer(f, data = model_data)
+      test_label <- "linear model"
+      
+    } else {
+
+        if (fixed_effect == "") {
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + (1|Subject_ID)"))
+
+        } else {
+          
+          f <- as.formula(paste0("log(`", y, "`) ~ `", x, "` + scale(`", fixed_effect, "`) + (1|Subject_ID)"))
+
+        }
+      
+      
+      random_effect <- "(1|Subject_ID)"
+      model <- lmerTest::lmer(f, data = model_data)
+      test_label <- "linear mixed model"
+    }
+    
+    
+      pval <- as.numeric(summary(model)$coefficients[2, "Pr(>|t|)"])
+    
+      coef <- as.numeric(summary(model)$coefficients[2, "Estimate"])
+      log2FC <- coef / log(2)
+      
+      
+        se      <- as.numeric(summary(model)$coefficients[2, "Std. Error"])
+   ci_log <- coef + c(-1, 1) * 1.96 * se
+      ci_log2 <- ci_log / log(2)
+  
+  # extract std beta (in log-transformed units)
+  sd_y <- sd(log(model_data[[y]]), na.rm = TRUE)
+  coef_std <- coef / sd_y
+       
+    tibble::tibble(response = y,
+                   predictor = x,
+                   test = test_label,
+                   adjusted_by = glue("{fixed_effect}, {random_effect}"),
+                   n_total = glue("{n_tested}/{n_total}"),
+                   n_HMP = glue("{n_hmp}/{total_hmp}"),
+                   n_LMP = glue("{n_lmp}/{total_lmp}"),
+                    estimate_type = "log2FC",
+         estimate = log2FC,
+         estimate_std = coef_std,
+          CI_log2FC_lower = ci_log2[1],
+                     CI_log2FC_upper = ci_log2[2],
+         p = pval
+                   )
+    
+    }) %>% bind_rows() %>% 
+ mutate(type_response = case_when(
+    str_detect(response, "p_") ~ "plasma",
+    str_detect(response, "f_") ~ "fecal",
+    str_detect(response, "glp1") ~ "glp1",
+    TRUE ~ "stool"
+    ),
+    .after = "response") %>%
+  group_by(type_response, adjusted_by) %>%
+  mutate(FDR = p.adjust(p, method = "BH"), .after = "p") %>%
+  ungroup() %>% 
+  mutate(signif_p = get_significance_asterisks(p, asterisks_p), .after = "p") %>%
+    mutate(signif_FDR = get_significance_asterisks(FDR, asterisks_fdr), .after = "FDR")
+}
+```
+
+
+# 2) Heatmap plasma + fecal SCFA
+
+## 2.1) Edit results data for heatmap
+```{r}
+gc_fp_scfa_data <-
+ gc_res %>% 
+  filter(type_response %in% c("fecal", "plasma")) %>% 
+   filter(adjusted_by ==  ", (1|Subject_ID)" |
+        # str_detect(adjusted_by, "SLBTT") |
+         str_detect(adjusted_by, "WGTT")
+         ) %>% 
+  mutate(response = str_replace_all(response, "f_", "")) %>%
+  mutate(response = str_replace_all(response, "p_", "")) %>%
+  mutate(adjustment_label = case_when(
+    str_detect(adjusted_by, "WGTT") ~ "Adjusted for WGTT",
+    str_detect(adjusted_by, "SLBTT") ~ "Adjusted for ITT",
+    adjusted_by == ", (1|Subject_ID)" ~ "Minimal adjustment",
+     adjusted_by == "" ~ "Minimal adjustment",
+  ),
+  adjustment_label = factor(adjustment_label, levels = c(
+    "Minimal adjustment", 
+  #  "Adjusted for ITT",
+    "Adjusted for WGTT"
+  ))) %>% 
+    mutate(type_response = case_when(
+    type_response == "plasma" ~ "Plasma SCFA",
+    type_response == "fecal" ~ "Faecal SCFA",
+    TRUE ~ "Other (check code)",
+  )) %>% 
+  # assign a "significance label"
+  mutate(
+    significance_type = case_when(
+      FDR < params$threshold_fdr ~ "fdr",
+      p < params$threshold_p & FDR >= params$threshold_fdr ~ "nominal",
+      TRUE ~ "ns"
+    )
+  )
+
+
+cor_fp_scfa_data <- cor_res %>% 
+  filter(type_response %in% c("fecal", "plasma")) %>% 
+  filter(type_predictor %in% c("pH", "breath", "methanogens")) %>% 
+  filter(!predictor %in% c("ph_small_bowel", "ph_colon", "ph_rectum")) %>% 
+  filter(adjusted_by == "" | adjusted_by == ", (1|Subject_ID)") %>% 
+ mutate(response = str_replace_all(response, "f_", "")) %>%
+  mutate(response = str_replace_all(response, "p_", "")) %>%
+ mutate(type_predictor = forcats::fct_collapse(
+    type_predictor,
+    "Breath and\nmethanogens" = c("breath", "methanogens")
+  )) %>% 
+  mutate(type_response = case_when(
+    type_response == "plasma" ~ "Plasma SCFA",
+    type_response == "fecal" ~ "Faecal SCFA",
+    TRUE ~ "Other (check code)",
+  )) %>% 
+   # assign a "significance label"
+  mutate(
+    significance_type = case_when(
+      FDR < params$threshold_fdr ~ "fdr",
+      p < params$threshold_p & FDR >= params$threshold_fdr ~ "nominal",
+      TRUE ~ "ns"
+    )
+  ) %>% 
+  # add an "adjustment"/fixed effect" label
+  mutate(predictor_label = case_when(
+     predictor == "smithii_inv_ct" ~ "M. smithii",
+    predictor == "archaea_inv_ct" ~ "Archaea",
+    predictor == "fasting_CH4" ~ "Fasting breath methane",
+    predictor == "fasting_H2" ~ "Fasting breath hydrogen",
+    predictor == "ph_proximal_colon" ~ "Proximal colonic pH",
+    predictor == "ph_distal_colon" ~ "Distal colonic pH",
+    predictor == "ph_sigmoid_colon" ~ "Sigmoid colonic pH",
+  #  predictor == "ph_rectum" ~ "Rectal pH",
+  #  predictor == "ph_small_bowel" ~ "Small bowel pH",
+  #  predictor == "ph_colon" ~ "Colonic pH",
+  TRUE ~ predictor
+  ),
+  predictor_label = factor(
+    predictor_label,
+    levels = c(
+       "Fasting breath methane",
+       "Fasting breath hydrogen",
+       "Archaea",
+       "M. smithii",
+     # "Small bowel pH",
+    #  "Colonic pH",
+      "Proximal colonic pH",
+      "Distal colonic pH",
+      "Sigmoid colonic pH"
+   #   "Rectal pH"
+  ))
+  )
+```
+
+
+## 2.2) Heatmap aesthetics
+```{r}
+# color gradients
+gc_color_max_value <- gc_fp_scfa_data %>% 
+  pull(estimate_std) %>%
+  abs() %>% max(na.rm = TRUE) %>% 
+  paulaR::ceiling_signif(digits = 0)
+
+gc_fill_scale <- scale_fill_gradient2(
+  low = study_colors$methane[[1]],
+  mid = "white",
+  high = study_colors$methane[[2]],
+  midpoint = 0,
+  limits = c(-gc_color_max_value, gc_color_max_value),
+  breaks = c(-gc_color_max_value, 0, gc_color_max_value),  
+  guide = guide_colorbar(title.position = "top"),
+  name = "Group comparison\n(standardized β)",
+ labels = c(
+    glue("{-gc_color_max_value}\nhigher\nin HMP"),
+    "0",
+    glue("{gc_color_max_value}\nhigher\nin LMP")
+  )
+)
+
+
+cor_color_max_value <- cor_fp_scfa_data %>% 
+  pull(estimate_std) %>%
+  abs() %>% max(na.rm = TRUE) %>% 
+  paulaR::ceiling_signif(digits = 0)
+
+cor_fill_scale <- scale_fill_gradient2(
+  low = study_colors$correlation[[1]],
+  mid = study_colors$correlation[[2]],
+  high = study_colors$correlation[[3]],  
+    midpoint = 0,
+    limits = c(-cor_color_max_value, cor_color_max_value),
+    breaks = c(-cor_color_max_value, 0, cor_color_max_value),
+    guide = guide_colorbar(title.position = "top"),
+    name = "Correlation\n(standardized β)"
+  )
+
+fontsize <- 14
+fontsize_hm <- 16
+```
+
+## 2.3) GC heatmap
+```{r}
+gc_fp_scfa_hm <-
+  gc_fp_scfa_data %>% 
+  
+  ggplot(aes(x = response,
+             y = adjustment_label)) +
+
+  # heatmap tiles
+  geom_tile(aes(fill = estimate_std), color = "grey20") +
+
+  facet_grid( ~ type_response,
+             scales = "free", space = "free", switch = "y") + 
+  
+  # circles nominal P
+  geom_point(
+    data = gc_fp_scfa_data %>% filter(significance_type == "nominal"),
+    aes(x = response, 
+        y = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = NA,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  
+  # circles FDR
+  geom_point(
+    data = gc_fp_scfa_data %>% filter(significance_type == "fdr"),
+    aes(x = response, 
+        y = adjustment_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = "black",                   
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+
+  # tile color scale
+  gc_fill_scale +
+
+  # shape scale
+  scale_shape_manual(
+    name = "",
+    values = c(nominal = 21, fdr = 21),
+    labels = c(nominal = "p < 0.05", fdr = "q < 0.1")
+  ) +
+
+  labs(y = "HMP vs LMP", 
+       x = NULL) +
+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  
+  paulaR::white_theme(font_size = fontsize_hm) +
+  theme(
+    axis.text.x = element_text(angle = -45,
+                               hjust = 1,
+                               size = fontsize_hm,
+                               color = "black"),
+        axis.title.y = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "gray80", #"black",    
+            size = fontsize_hm - 6,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "left-rotated",  
+            halign = 0.5,       
+            valign = 0.5        
+          ),
+    axis.text.y = element_text(color = "black"),
+    legend.title = element_text(size = fontsize_hm-4, face = "bold"),
+    legend.text = element_text(size = fontsize_hm-4),
+    legend.position = "bottom",
+    legend.location = "horizontal",
+    panel.grid = element_blank()
+  )
+
+gc_fp_scfa_hm
+```
+
+## 2.4) Cor heatmap
+```{r}
+cor_fp_scfa_hm <-
+  cor_fp_scfa_data %>% 
+  ggplot(aes(x = response, y = predictor_label)) +
+  
+  # heatmap tiles
+  geom_tile(aes(fill = estimate_std), color = "grey20") +
+  
+  facet_grid(type_predictor ~ type_response,
+             scales = "free", space = "free", switch = "y") + 
+
+
+  # circles nominal P
+  geom_point(
+    data = cor_fp_scfa_data %>% filter(significance_type == "nominal"),
+    aes(x = response, 
+        y = predictor_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = NA,
+    inherit.aes = FALSE
+  ) +
+  # circles FDR
+  geom_point(
+    data = cor_fp_scfa_data %>% filter(significance_type == "fdr"),
+    aes(x = response, 
+        y = predictor_label,
+        shape = significance_type),
+    color = "black",
+    size = 3,
+    stroke = 1,
+    fill = "black",                   
+    inherit.aes = FALSE
+  ) +
+
+  # tile color scale
+  cor_fill_scale +
+  
+    # shape scale
+  scale_shape_manual(
+    name = "",
+    values = c(nominal = 21, fdr = 21),
+    labels = c(nominal = "p < 0.05", fdr = "q < 0.1")
+  ) +
+
+
+  labs(
+    y = NULL,
+    x = NULL,
+  ) +
+  
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  
+  guides(
+    fill = guide_colorbar(order = 1,
+                          title.position = "top"),
+    shape = guide_legend(order = 2)
+  ) + 
+  
+  paulaR::white_theme(font_size = fontsize_hm) +
+  theme(
+    axis.text.x = element_text(angle = -45,
+                               hjust = 1,
+                               size = fontsize_hm,
+                               color = "black"),
+    axis.text.y = element_text(color = "black"),
+    axis.title.y = ggtext::element_textbox_simple(
+            fill = "gray80",        
+            color = "black",       
+            box.color = "black",    
+            size = fontsize_hm - 8,
+            linetype = 1,
+           linewidth = 0.75,         
+            padding = margin(4,4,4,4),
+            margin = margin(b = 5, t = 5),
+            orientation = "left-rotated",  
+            halign = 0.5,       
+            valign = 0.5        
+          ),
+    legend.title = element_text(size = fontsize_hm - 4, face = "bold"),
+    legend.text = element_text(size = fontsize_hm-4),
+    legend.position = "bottom",
+    legend.location = "horizontal",
+    panel.grid = element_blank()
+  )
+
+cor_fp_scfa_hm
+```
+
+## 2.5) Join both plots
+```{r}
+joint_fp_scfa_hm <- wrap_plots(
+  list(gc_fp_scfa_hm + theme(
+    axis.text.x.top = element_text(angle = -30)
+  ),
+       cor_fp_scfa_hm + theme(
+          axis.line.x.top = element_blank(), 
+          strip.text.x = element_blank(),
+          strip.background.x = element_blank(),
+          axis.text.x.top = element_blank(),
+          axis.ticks.x.top = element_blank()
+          )
+       ),
+  nrow = 2) +
+  plot_layout(
+    guides = "collect", 
+    axes = "collect",
+    heights = c(2/9, 7/9)
+    ) &
+  theme(
+    legend.position = "bottom",    
+    legend.direction = "horizontal",
+    legend.title.align = 0.5,
+    legend.box.margin =  margin(l = -50)
+    )
+
+joint_fp_scfa_hm
+```
+
+
+
+
+
+# 3) PCA fecal SCFA
+```{r}
+if (!params$is_mb_means){
+
+  top_k <- length(fecal %>% select(-Sample_ID))
+  loadings_factor <- 10
+  
+  loadings_offset_y_pos <- 0.01
+  loadings_offset_y_neg <- -0.01
+  
+  loadings_offset_x_pos <- 0.01
+  loadings_offset_x_neg <- -0.01
+
+  
+  fecal_pca_data <- fecal %>% rename_with(~ str_remove(., "f_")) %>% na.omit()
+  
+  pca <- prcomp(fecal_pca_data %>% select(-Sample_ID), scale = T)
+  
+  scores <- fecal_pca_data %>%
+    select(Sample_ID) %>% 
+    left_join(meta %>% select(Sample_ID, Subject_ID, params$methane_group),
+              by = "Sample_ID") %>% 
+    bind_cols(data.frame(pca$x[ , 1:top_k]))
+  
+  
+  loadings <- pca$rotation[ , 1:top_k] %>% 
+    as_tibble(rownames = "var") %>% 
+    mutate(
+      y_offset = ifelse(PC2 > 0, loadings_offset_y_pos, loadings_offset_y_neg),
+      x_offset = ifelse(PC1 > 0, loadings_offset_x_pos, loadings_offset_x_neg),
+      label_x = PC1*loadings_factor + x_offset,
+      label_y = PC2*loadings_factor + y_offset
+    )
+  
+  importances <- summary(pca)
+  
+  ylim <- c(paulaR::ceiling_signif(min(scores$PC2), 0)-1,
+          paulaR::ceiling_signif(max(scores$PC2), 0)+2)
+  
+  xlim <- c(paulaR::ceiling_signif(min(scores$PC1), 0),
+          paulaR::ceiling_signif(max(scores$PC1), 0)+1)
+  
+  ybreaks <- seq(ylim[1], ylim[2], 2)
+  xbreaks <- seq(xlim[1], xlim[2], 2)
+  
+  scores_plot <- 
+    scores %>% 
+  ggplot() + 
+  geom_point(aes(PC1,
+                 PC2,
+                 color = !!sym(params$methane_group),
+                 fill = !!sym(params$methane_group)
+                 ),
+             shape = 21, alpha = 0.5, size = 1) +
+  geom_hline(yintercept = 0,
+             color = "gray80",
+             linetype = "dashed") +
+  geom_vline(xintercept = 0,
+             color = "gray80",
+             linetype = "dashed")  +
+  stat_ellipse(data = scores, 
+               aes(x = PC1, y = PC2,
+                   group = !!sym(params$methane_group),
+                   fill = !!sym(params$methane_group)),
+               geom = "polygon",
+               alpha = 0.1,
+              # linetype = "dashed"
+               ) +
+  scale_fill_manual(values = study_colors$methane) +
+  scale_color_manual(values = study_colors$methane) +
+  labs(x = glue("PC1 ({as.character(signif(importances$importance[2,1]*100, 3))}%)"),
+       y = glue("PC2 ({as.character(signif(importances$importance[2,2]*100, 3))}%)"),
+       fill = "",
+       color = "") +
+  scale_y_continuous(limits = ylim,
+                     breaks = ybreaks) +
+    scale_x_continuous(limits = xlim,
+                       breaks = xbreaks) +
+  geom_segment(data = loadings %>% select(-var),
+               aes(x = 0,
+                   y = 0,
+                   xend = PC1*loadings_factor, # to make the arrows more far from the center
+                   yend = PC2*loadings_factor),
+             color = "gray30",
+             arrow = arrow(angle = 25, 
+                           length = unit(4, "pt"))
+             ) +
+  ggrepel::geom_text_repel(data = loadings,
+                  aes(x = label_x,
+                      y = label_y,
+                      label = var),
+            segment.color = "black",
+            size = fontsize/3,
+            vjust = 1,
+            hjust = 1,
+            # nudge_x = 0.5,
+            # nudge_y = 0.5,
+            max.overlaps = Inf,
+            segment.linetype = "dashed"
+            ) +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = "bottom",
+        plot.margin = margin(5,5,5,5))
+
+
+
+test_pc1 <- lmerTest::lmer(
+  as.formula(paste("PC1 ~", params$methane_group, "+ (1|Subject_ID)")),
+  data = scores) %>%
+  broom.mixed::tidy() %>%
+  rename("p" = `p.value`) %>% 
+  filter(str_detect(term, params$methane_group)) %>% 
+  mutate(group1 = "HMP", 
+         group2 = "LMP",
+    label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = min(scores$PC1)*1.05)
+
+test_pc2 <- lmerTest::lmer(
+  as.formula(paste("PC2 ~", params$methane_group, "+ (1|Subject_ID)")),
+  data = scores) %>%
+  broom.mixed::tidy() %>%
+  rename("p" = `p.value`) %>% 
+  filter(str_detect(term, params$methane_group)) %>% 
+  mutate(group1 = "HMP", 
+         group2 = "LMP",
+    label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+    ),
+    y.position = max(scores$PC2)*1.05)
+
+boxplot_pc1 <- 
+  scores %>% 
+  ggplot(aes(x = !!sym(params$methane_group),
+             y = PC1,
+             group = !!sym(params$methane_group))) +
+  geom_boxplot(aes(fill = !!sym(params$methane_group)),
+               alpha = 0.5, 
+               outlier.shape = NA) +
+  geom_jitter(aes(fill = !!sym(params$methane_group),
+                  color = !!sym(params$methane_group)),
+              shape = 21,
+              alpha = 0.5,
+              height = 0,
+              size = 1)+
+  scale_fill_manual(values = study_colors$methane) +
+  scale_color_manual(values = study_colors$methane) +
+  # yes its on purpose we scale Y with X params (below there's a coord flip)
+  scale_y_continuous(breaks = xbreaks,
+                     limits = xlim) +
+  guides(color = "none") +
+  stat_pvalue_manual(
+        test_pc1,
+        label = "label",
+        angle = 90,
+        hjust = 1,
+        vjust = -1,
+        tip.length = -0.01,
+        size = fontsize/3
+      ) +
+  coord_flip() +
+  labs(x = "",
+       y = "",
+       fill = "") +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = "none",
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        panel.border = element_blank(),
+        plot.margin = margin(0,0,0,0),
+        panel.grid = element_blank())
+
+
+
+boxplot_pc2 <- 
+  scores %>% 
+  ggplot(aes(x = !!sym(params$methane_group),
+             y = PC2,
+             group = !!sym(params$methane_group))) +
+  geom_boxplot(aes(fill = !!sym(params$methane_group)),
+               alpha = 0.5, 
+               outlier.shape = NA) +
+  geom_jitter(aes(fill = !!sym(params$methane_group),
+                  color = !!sym(params$methane_group)),
+              shape = 21,
+              alpha = 0.5,
+              height = 0,
+              size = 1)+
+  scale_fill_manual(values = study_colors$methane) +
+  scale_color_manual(values = study_colors$methane) +
+  scale_y_continuous(breaks = ybreaks,
+                     limits = ylim) +
+  guides(color = "none") +
+  stat_pvalue_manual(
+        test_pc2,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+  labs(x = "",
+       y = "",
+       fill = "") +
+  paulaR::white_theme(font_size = fontsize) +
+  theme(legend.position = "none",
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        panel.border = element_blank(),
+        plot.margin = margin(0,0,0,0),
+        panel.grid = element_blank())
+
+
+
+thin_pc2 <- ggplotGrob(boxplot_pc2)
+thin_pc2$widths <- unit(rep(3, length(thin_pc2$widths)), "cm")
+
+joint_pca <- (boxplot_pc1 + plot_spacer()) /
+  (scores_plot + wrap_elements(thin_pc2)) +
+  plot_layout(heights = c(1, 3),
+              widths = c(3, 1),
+              axes = "collect",
+              ) &
+  theme(plot.margin = margin(5,5,5,5),
+          plot.tag.position = c(0, 1),    
+    plot.tag = element_text(size = fontsize))  
+
+joint_pca
+
+}
+```
+
+# 4) Individual SCFA plots
+## 4.1) Fecal propionate
+```{r}
+x <- params$methane_group
+y <- "f_Propionate"
+ylab <- "Propionate (μmol/g dry feces)"
+ylim <- c(
+  paulaR::trunc_signif(min(data[y], na.rm = T), 0),
+  paulaR::ceiling_signif(max(data[y], na.rm = T), 0)
+  )
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1], 100, 20)
+
+test <- tibble(
+  .y. = y,
+  group1 = "LMP",
+  group2 = "HMP",
+  p = gc_res %>% filter(response == y, adjusted_by == ", (1|Subject_ID)") %>% pull(p),
+  y.position = ppos,
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+  ))
+
+f_prop_plot <- 
+  data %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.3) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(y = ylab,
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+f_prop_plot
+```
+
+## 4.2) Fecal butyrate
+```{r}
+x <- params$methane_group
+y <- "f_Butyrate"
+ylab <- "Butyrate (μmol/g dry feces)"
+ylim <- c(
+  paulaR::trunc_signif(min(data[y], na.rm = T), 0),
+  paulaR::ceiling_signif(max(data[y], na.rm = T), 0)
+  )
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1], 30, 5)
+
+test <- tibble(
+  .y. = y,
+  group1 = "LMP",
+  group2 = "HMP",
+  p = gc_res %>% filter(response == y, adjusted_by == ", (1|Subject_ID)") %>% pull(p),
+  y.position = ppos,
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+  ))
+
+f_but_plot <- 
+  data %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.3) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(y = ylab,
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+f_but_plot
+```
+
+
+## 4.3) Fecal butyrate - distal colonic pH
+```{r}
+x <- "ph_distal_colon"
+y <- "f_Butyrate"
+ylab <- "Butyrate (μmol/g dry feces)"
+
+
+model_data <- data %>%
+   select(!!sym(x), !!sym(y), Subject_ID, !!sym(params$methane_group)) %>%
+   group_by(Subject_ID) %>%
+   summarize(!!sym(x) := mean(!!sym(x), na.rm = TRUE),
+             !!sym(y) := mean(!!sym(y), na.rm = TRUE),
+             !!sym(params$methane_group) := unique(!!sym(params$methane_group)))
+
+ylim <- c(
+  paulaR::trunc_signif(min(model_data[y], na.rm = T), 0),
+  paulaR::ceiling_signif(max(model_data[y], na.rm = T), 0)+5
+  )
+breaks <- seq(ylim[1], ylim[2], 10)
+
+xlim <- c(paulaR::trunc_signif(min(model_data[[x]], na.rm = T), 0)-0.3,
+          paulaR::ceiling_signif(max(model_data[[x]], na.rm = T), -1)+0.3)
+
+test <- tibble(
+  estimate = cor_res %>% filter(response == y, predictor == x, adjusted_by == "") %>% pull(estimate),
+  p = cor_res %>% filter(response == y, predictor == x, adjusted_by == "") %>% pull(p)
+) %>% 
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("β = {round(estimate, 3)}"),
+    label = glue("{r_lab}, {p_lab}")
+  )
+  
+    
+
+f_but_dist_ph_plot <-
+  model_data %>% 
+  select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+              x = 5.1,
+              y = 24, 
+             label = test$label,
+             size = fontsize/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks
+                       ) +
+    labs(title = "",
+         y = ylab,
+         x = "Distal colonic pH",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "bottom",
+          plot.margin = margin(5,5,5,5),
+          axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+f_but_dist_ph_plot
+```
+
+## 4.4) Plasma butyrate - prox colonic pH
+```{r}
+x <- "ph_proximal_colon"
+y <- "p_Butyrate"
+ylab <- "Plasma butyrate (μmol/mL)"
+
+
+model_data <- data %>%
+  select(!!sym(x), !!sym(y), Subject_ID, !!sym(params$methane_group)) %>%
+  group_by(Subject_ID) %>%
+  summarize(!!sym(x) := mean(!!sym(x), na.rm = TRUE),
+            !!sym(y) := mean(!!sym(y), na.rm = TRUE),
+            !!sym(params$methane_group) := unique(!!sym(params$methane_group)))
+
+ylim <- c(
+  paulaR::trunc_signif(min(model_data[y], na.rm = T), 0),
+  paulaR::ceiling_signif(max(model_data[y], na.rm = T), 0)+0.5
+  )
+breaks <- seq(ylim[1], ylim[2], 1)
+
+xlim <- c(4.7, 8.5) # comparable limits to previous plot
+
+test <- tibble(
+  estimate = cor_res %>% filter(response == y, predictor == x, adjusted_by == "") %>% pull(estimate),
+  p = cor_res %>% filter(response == y, predictor == x, adjusted_by == "") %>% pull(p)
+) %>% 
+  mutate(p_lab = ifelse(
+    p < 0.001,
+    "p < 0.001",
+    glue("p = {round(p, 3)}")
+    ),
+    r_lab = glue("β = {round(estimate, 3)}"),
+    label = glue("{r_lab}, {p_lab}")
+  )
+  
+    
+
+p_but_ph_plot <-
+  model_data %>% 
+  select(!!sym(x), !!sym(y), !!sym(params$methane_group)) %>% 
+  na.omit() %>% 
+    ggplot(aes(x = !!sym(x),
+               y = !!sym(y))
+           ) +
+    geom_point(aes(fill = !!sym(params$methane_group)), 
+               shape = 21,
+               stroke = 1.2,
+               color = "black",
+               alpha = 0.6,
+               size = 3) +
+    scale_fill_manual(values = study_colors$methane) +
+    geom_smooth(method = "lm", color = "black", se = F) +
+    annotate("text",
+              x = 5.1,
+              y = ylim[2], 
+             label = test$label,
+             size = 14/3,
+             hjust = 0) +
+    scale_x_continuous(limits = xlim
+                       ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks
+                       ) +
+    labs(title = "",
+         y = ylab,
+         x = "Proximal colonic pH",
+         fill = ""
+    ) +
+    paulaR::white_theme(font_size = 14) +
+    theme(legend.position = "bottom",
+          plot.margin = margin(5,5,5,5),
+          axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+p_but_ph_plot
+```
+
+# 5) Extra plots
+## 5.1) Plasma GLP1
+```{r}
+x <- params$methane_group
+y <- "glp1"
+ylab <- "GLP-1 (μmol/mL)"
+ylim <- c(
+  0, 
+  paulaR::ceiling_signif(max(data[y], na.rm = T), 0)+1
+  )
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1], ylim[2], 2)
+
+
+test <- tibble(
+  .y. = y,
+  group1 = "LMP",
+  group2 = "HMP",
+  p = gc_res %>% filter(response == y, adjusted_by == ", (1|Subject_ID)") %>% pull(p),
+  y.position = ppos,
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+  ))
+
+p_glp1_plot <- 
+  data %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.3) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(y = ylab,
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+p_glp1_plot
+```
+
+## 5.2) BMI
+```{r}
+meta_means_w_bmi <- meta_raw %>% 
+  select(Subject_ID,
+         !!sym(params$methane_group),
+         sex, bmi, weight) %>% 
+  distinct()
+
+x <- params$methane_group
+y <- "bmi"
+ylab <- expression(BMI~(kg/m^2))
+ylim <- c(
+  paulaR::trunc_signif(min(meta_means_w_bmi[y], na.rm = T), 0),
+  paulaR::ceiling_signif(max(meta_means_w_bmi[y], na.rm = T), 0)+1
+  )
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1]+1, ylim[2]-1, 2)
+
+test <- wilcox.test(
+  as.formula(paste("bmi ~", x)),
+  data = meta_means_w_bmi) %>%
+  tidy() %>% 
+  mutate(
+  .y. = y,
+  group1 = "LMP",
+  group2 = "HMP",
+  p = p.value,
+  y.position = ppos,
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+  ))
+
+bmi_plot <- 
+  meta_means_w_bmi %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.3) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(y = ylab,
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+bmi_plot
+```
+
+## 5.3) Body weight
+```{r}
+x <- params$methane_group
+y <- "weight"
+ylab <- "Weight (kg)"
+ylim <- c(
+  paulaR::trunc_signif(min(meta_means_w_bmi[y], na.rm = T), 0),
+  paulaR::ceiling_signif(max(meta_means_w_bmi[y], na.rm = T), 0)+1
+  )
+ppos <- ylim[1] + ((ylim[2]-ylim[1]) * 0.99)
+breaks <- seq(ylim[1]+5, ylim[2]-4, 10)
+
+test <- wilcox.test(
+  as.formula(paste("weight ~", x)),
+  data = meta_means_w_bmi) %>%
+  tidy() %>% 
+  mutate(
+  .y. = y,
+  group1 = "LMP",
+  group2 = "HMP",
+  p = p.value,
+  y.position = ppos,
+) %>% 
+  mutate(label = case_when(
+    p < 0.001 ~ "p < 0.001",
+    p > 0.1 ~ "p > 0.1",
+    TRUE ~ glue("p = {round(p, 3)}")
+  ))
+
+weight_plot <- 
+  meta_means_w_bmi %>% 
+     select(!!sym(x), !!sym(y)) %>% 
+     filter(!is.na(!!sym(x)), !is.na(!!sym(y))) %>% 
+     ggplot(aes(x = !!sym(x), 
+                y = !!sym(y),
+                fill = !!sym(x))) + 
+     geom_boxplot(outlier.shape = NA,
+                  color = "black") +
+     geom_jitter(aes(fill = !!sym(x)), 
+                 color = "black",
+                 shape = 21,
+                 size = 1,
+                 height = 0,
+                 stroke = 1.2,
+                 alpha = 0.3) +
+     scale_fill_manual(values = study_colors$methane) +
+    stat_pvalue_manual(
+        test,
+        label = "label",
+        tip.length = 0.01,
+        size = fontsize/3
+      ) +
+     labs(y = ylab,
+          x = "",
+          ) +
+    scale_y_continuous(limits = ylim,
+                       breaks = breaks,
+                       expand = expansion(mult = c(0.05, 0.15))) +
+    paulaR::white_theme(font_size = fontsize) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = fontsize - 2))
+
+weight_plot
+```
+
+### 5.4) Join all (supl fig)
+```{r}
+glp1_w_bmi_plot <- (p_glp1_plot + labs(title = "GLP-1")) +
+  (weight_plot + labs(title = "Weight")) + 
+  (bmi_plot + labs(title = "Body mass index")) +
+  plot_annotation(tag_levels = "A")
+
+glp1_w_bmi_plot
+```
+
+
+# 6) Extra numbers for manuscript
+```{r}
+# fecal butyrate and propionate
+gc_res %>%
+  filter(type_response == "fecal", adjusted_by == ", (1|Subject_ID)") %>%
+  select(response, estimate, p, FDR) %>%
+  flextable()
+
+# individual correlations - faecal butyrate and ph
+cor_res %>% 
+  filter(type_response == "fecal",
+         type_predictor == "pH", 
+         adjusted_by == "",
+         predictor %in% c("ph_proximal_colon", "ph_distal_colon", "ph_sigmoid_colon")) %>%
+  mutate(fdr = p.adjust(p, "BH")) %>%
+  select(response, predictor, test, estimate, p, fdr) %>%
+  mutate(estimate = round(estimate, 4),
+         p = round(p, 4),
+         fdr = round(fdr, 4)) %>%
+  filter(str_detect(response, "Butyrate"))  %>%
+  flextable()
+
+# individual correlations - plasma butyrate and ph
+ cor_res %>% 
+   filter(type_response == "plasma",
+          type_predictor == "pH", 
+          adjusted_by == "",
+          predictor %in% c("ph_proximal_colon", "ph_distal_colon", "ph_sigmoid_colon")) %>%
+   mutate(fdr = p.adjust(p, "BH")) %>%
+   select(response, predictor, test, estimate, p, fdr) %>%
+   mutate(estimate = round(estimate, 4),
+          p = round(p, 4),
+          fdr = round(fdr, 4)) %>%
+   filter(str_detect(response, "Butyrate"))  %>%
+   flextable()
+ 
+ # individual correlations - plasma butyrate and smithii
+ cor_res %>% 
+   filter(response == "p_Butyrate",
+          adjusted_by == "",
+          predictor %in% c("smithii_inv_ct")) %>%
+   select(response, predictor, test, estimate, p, FDR) %>%
+   mutate(estimate = round(estimate, 4),
+          p = round(p, 4),
+          FDR = round(FDR, 4)) %>%
+   flextable()
+```
+
+
+
+
+# Save results
+
+## Plasma + fecal SCFA heatmap
+```{r}
+format <- "png"
+joint_fp_scfa_hm 
+ggsave(glue("{fig_dir}/{params$markdown_id}_plasma_fecal_SCFA_GC_corr_heatmap.{format}"),
+       bg = "white",
+       width = 8,
+       height = 6.5,
+       dpi = 400
+       )
+saveRDS(joint_fp_scfa_hm,
+        glue("{rds_dir}/{params$markdown_id}_plasma_fecal_SCFA_GC_corr_heatmap.rds"))
+```
+
+## Boxplots SCFA
+```{r}
+format <- "png" # png # pdf
+f_prop_plot
+ggsave(glue("{fig_dir}/{params$markdown_id}_fecal_propionate_boxplot.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+saveRDS(f_prop_plot,
+        glue("{rds_dir}/{params$markdown_id}_fecal_propionate_boxplot.rds"))
+
+f_but_plot
+ggsave(glue("{fig_dir}/{params$markdown_id}_fecal_butyrate_boxplot.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+saveRDS(f_but_plot,
+        glue("{rds_dir}/{params$markdown_id}_fecal_butyrate_boxplot.rds"))
+
+
+p_glp1_plot
+ggsave(glue("{fig_dir}/{params$markdown_id}_plasma_glp1_boxplot.{format}"),
+       bg = "white",
+       width = 3,
+       height = 3,
+       dpi = 300)
+```
+
+## Individual correlations
+```{r}
+format <- "png" # png # pdf
+p_but_ph_plot
+ggsave(glue("{fig_dir}/{params$markdown_id}_plasma_butyrate_ph_proximal_colon.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+saveRDS(p_but_ph_plot,
+        glue("{rds_dir}/{params$markdown_id}_plasma_butyrate_ph_proximal_colon.rds"))
+
+f_but_dist_ph_plot
+ggsave(glue("{fig_dir}/{params$markdown_id}_fecal_butyrate_ph_distal_colon.{format}"),
+       bg = "white",
+       width = 4.5,
+       height = 4,
+       dpi = 300)
+saveRDS(f_but_dist_ph_plot,
+        glue("{rds_dir}/{params$markdown_id}_fecal_butyrate_ph_distal_colon.rds"))
+```
+
+## Fecal SCFA PCA
+```{r}
+if (! params$is_mb_means){
+  joint_pca + plot_annotation(tag_levels = "A")
+  
+  ggsave(glue("{fig_dir}/{params$markdown_id}_fecal_SCFA_PCA.{format}"),
+       bg = "white",
+       width = 8,
+       height = 6,
+       dpi = 400
+       )
+  saveRDS(joint_pca, glue("{rds_dir}/{params$markdown_id}_fecal_SCFA_PCA.rds"))
+
+}
+```
+
+## GLP-1 - BMI - Weight (Supplementary)
+```{r}
+ggsave(glue("{fig_dir}/{params$markdown_id}_Sup_Fig_GLP1_Weight_BMI.{format}"),
+       bg = "white",
+       width = 8,
+       height = 3,
+       dpi = 400
+       )
+  saveRDS(glp1_w_bmi_plot, glue("{rds_dir}/{params$markdown_id}_boxplots_glp1_weight_bmi.rds"))
+```
+
+
+## Results tables - correlations and methane group comparison
+```{r}
+saveRDS(cor_res,
+      glue("{rds_dir}/{params$markdown_id}_scfa_correlation.rds"))
+
+write.xlsx(cor_res,
+         glue("{tab_dir}/{params$markdown_id}_scfa_correlation.xlsx"))
+
+
+saveRDS(gc_res,
+      glue("{rds_dir}/{params$markdown_id}_scfa_methane_group_comparison.rds"))
+
+write.xlsx(gc_res,
+         glue("{tab_dir}/{params$markdown_id}_scfa_methane_group_comparison.xlsx"))
+```
+
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

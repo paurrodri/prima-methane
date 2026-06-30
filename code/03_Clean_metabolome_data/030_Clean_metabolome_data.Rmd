@@ -1,0 +1,251 @@
+---
+title: "Clean metabolome data"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "030"
+---
+
+There are 2 metabolomics data files to clean:
+- Fecal SCFA
+  - Contains measured concentrations of SCFA, measured via targeted LCMS at NEXS
+- Plasma SCFA
+  - Contains measured concentrations of SCFA, measured via targeted LCMS at KU/CBMR metabolomics platform
+
+
+Additionally:
+- This Rmarkdown also calculates subject-means for all resulting files.
+- This Rmarkdown also contains the cleaning process of the plasma GLP-1 raw measurements.
+
+
+The resulting output files will be:
+
+- 1) fecal_scfa.rds
+- 2) plasma_scfa.rds
+- 3) plasma_glp1.rds
+
+- 4) fecal_scfa_means.rds
+- 5) plasma_scfa_means.rds
+- 6) plasma_glp1_means.rds
+
+
+
+# Setup
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                      root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(readxl)
+library(glue)
+library(stringr)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+## Directories
+```{r}
+```
+
+
+# Read data
+
+## 1. Fecal SCFA/BCFA data
+```{r}
+f_scfa_raw <- read_excel(
+  # path-to-raw-data
+  )
+```
+
+## 2. Plasma SCFA
+```{r}
+p_scfa_raw <- read_excel(
+  # path-to-raw-data
+  )
+```
+
+## 3. Plasma GLP-1
+```{r}
+p_glp1_raw <- read_excel(
+  # path-to-raw-data
+  )
+```
+
+## 4. Meta
+```{r}
+meta_raw <- readRDS(meta_all_filename)
+meta <- meta_raw
+```
+
+
+# 1. Clean fecal SCFA data
+## 1.1) Clean and average file
+```{r}
+f_scfa <- f_scfa_raw %>%
+  select(-ID) %>% 
+  rename(Sample_ID = Sample,
+         Isovalerate = Isavalerate) %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .before = Sample_ID) %>% 
+  select(Sample_ID, everything(), -Day, -Subject_ID) %>% 
+  arrange(Sample_ID)
+
+# compute the means on the long files
+f_scfa_means <- f_scfa %>%
+   mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused", .before = 1) %>% 
+  group_by(Subject_ID) %>% 
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+  arrange(Subject_ID)
+```
+
+## 1.2) Compute values per dry feces weight
+```{r}
+f_scfa_dry <-
+  f_scfa %>% 
+  left_join(meta %>% select(Sample_ID, stool_moisture),
+            by = "Sample_ID") %>% 
+  mutate(across(
+    -c(Sample_ID, stool_moisture),
+    ~ .x * (1 / (1 - stool_moisture))
+  )) %>% 
+  select(-stool_moisture)
+
+# compute the means on the long files
+f_scfa_dry_means <- f_scfa_dry %>%
+   mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused", .before = 1) %>% 
+  group_by(Subject_ID) %>% 
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+  arrange(Subject_ID)
+```
+
+
+# 2. Clean plasma SCFA
+```{r}
+p_scfa <-
+  p_scfa_raw %>% 
+  select("Subject_ID" = Subject,
+         "Day" = `Time-point`,
+         everything(),
+         -`Name LCMS file`) %>% 
+  naniar::replace_with_na_all(condition = ~str_detect(.x, "LOD")) %>% 
+  mutate(Subject_ID = as.character(Subject_ID)) %>% 
+  mutate(Sample_ID = str_c(Subject_ID, Day, sep = "-"), .before = 1) %>% 
+  select(-Day, -Subject_ID) %>% 
+  mutate(across(-all_of(c("Sample_ID")), as.double)) %>% 
+  group_by(Sample_ID) %>% 
+  summarise(across(-c(), mean, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(across(
+    where(is.numeric),
+    ~ replace(., is.nan(.), NA_real_)
+  )) %>% 
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), 
+         .after = "Sample_ID") %>% 
+  # Rename columns 
+  select(Sample_ID, 
+         Acetate = `Acetic acid`,
+         Propionate = `Propionic acid`,
+         Butyrate = `Butyric acid`,
+         Isobutyrate = `Isobutyric acid`,
+         Valerate = `Valeric acid`,
+         Isovalerate = `Isovaleric acid`,
+         Caproate = `Hexanoic acid`
+         ) %>% 
+  arrange(Sample_ID)
+
+
+p_scfa_means <- p_scfa %>%
+  mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused", .before = 1) %>% 
+  group_by(Subject_ID) %>% 
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  arrange(Subject_ID)
+```
+
+## 3. Clean plasma GLP-1
+```{r}
+p_glp1 <- 
+  p_glp1_raw %>% 
+  rename(Subject_ID = ID, 
+         "day_2" = `pmol/L...2`,
+         "day_9" = `pmol/L...3`) %>% 
+    pivot_longer(cols = -Subject_ID,
+               names_to = "Day",
+               values_to = "glp1") %>% 
+  mutate(Day = str_remove(Day, "day_")
+         ) %>% 
+  mutate(Sample_ID = str_c(Subject_ID, Day, sep = "-"), .before = 1) %>% 
+  select(-Subject_ID, -Day) %>% 
+  arrange(Sample_ID)
+
+
+p_glp1_means <- p_glp1 %>%
+   mutate(Subject_ID = str_split_i(Sample_ID, "-", 1), .keep = "unused", .before = 1) %>% 
+  group_by(Subject_ID) %>% 
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  arrange(Subject_ID)
+```
+
+
+
+# Save data
+## 1. Fecal SCFA
+```{r}
+# wet weight
+saveRDS(f_scfa,
+        glue("{rds_dir}/{params$markdown_id}_fecal_scfa.rds"))
+
+saveRDS(f_scfa_means,
+        glue("{rds_dir}/{params$markdown_id}_fecal_scfa_means.rds"))
+
+
+# dry weight
+saveRDS(f_scfa_dry,
+        glue("{rds_dir}/{params$markdown_id}_fecal_scfa_dry.rds"))
+
+saveRDS(f_scfa_dry_means,
+        glue("{rds_dir}/{params$markdown_id}_fecal_scfa_dry_means.rds"))
+```
+
+## 2. Plasma SCFA
+```{r}
+saveRDS(p_scfa ,
+        glue("{rds_dir}/{params$markdown_id}_plasma_scfa.rds"))
+
+saveRDS(p_scfa_means,
+        glue("{rds_dir}/{params$markdown_id}_plasma_scfa_means.rds"))
+```
+
+## 3. Plasma GLP-1
+```{r}
+saveRDS(p_glp1,
+        glue("{rds_dir}/{params$markdown_id}_plasma_glp1.rds"))
+
+saveRDS(p_glp1_means,
+        glue("{rds_dir}/{params$markdown_id}_plasma_glp1_means.rds"))
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+

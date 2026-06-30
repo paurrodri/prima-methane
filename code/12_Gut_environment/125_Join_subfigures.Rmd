@@ -1,0 +1,213 @@
+---
+title: "Join interesting figures from gut physiology analyses"
+author: "Paula Rodriguez-Garcia"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    output_dir: "html"
+params: 
+  markdown_id: "125"
+  methane_group: "Methane_group" 
+
+
+---
+
+# Setup
+
+## Knit options
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                       root.dir = rprojroot::find_rstudio_root_file())
+```
+
+## Libraries
+```{r}
+library(glue)
+library(patchwork)
+library(ggplot2)
+```
+
+## Study paramters
+```{r}
+if (file.exists("../../study_parameters.R")) {
+  source("../../study_parameters.R")
+} else {
+  source("study_parameters.R")
+}
+
+paulaR::show_rmd_params(params)
+```
+
+
+## Directories
+```{r}
+```
+
+## Functions
+```{r}
+```
+
+
+# Read plots
+```{r}
+load_raw <- readRDS(glue("{rds_dir}/120_Bacterial_load_boxplot_longitudinal.rds"))
+
+load_energy_raw <- readRDS(glue("{rds_dir}/120_Correlation_energy_bacterial_load_means.rds"))
+
+energy_raw <- readRDS(glue("{rds_dir}/120_Energy_boxplot_means.rds"))
+
+hm_h_raw <- readRDS(glue("{rds_dir}/121_results_heatmap_horizontal.rds"))
+
+ph_raw <- readRDS(glue("{rds_dir}/123_fig_ph.rds"))
+
+wgtt_raw <- readRDS(glue("{rds_dir}/123_fig_WGTT.rds"))
+
+slbtt_raw <- readRDS(glue("{rds_dir}/123_fig_SLBTT.rds"))
+
+# for supplementary
+sup_hm_h_raw <- readRDS(glue("{rds_dir}/121_MTT2_results_heatmap_horizontal.rds"))
+
+sup_wgtt_ch4_raw <- readRDS(glue("{rds_dir}/110_MTT2_WGTT_CH4_correlation.rds"))
+```
+
+# Clean/prepare plots
+```{r}
+load <- load_raw  +
+  labs(title = "Microbial load",
+       y = "cell counts\n per g wet faeces") 
+load$layers[[2]]$aes_params$alpha <- 0.1
+
+load_energy <- load_energy_raw +
+  labs(title = "Microbial load - energy density",
+         y = "mean cell counts\n per g wet faeces",
+       x = "J per g dry faeces") +
+  theme(plot.title = element_text(size = 12)) 
+
+energy <- energy_raw +
+  labs(y = "J per g dry faeces") +
+  scale_y_continuous(labels = waiver(), 
+                     limits = c(19000, 28000),
+                     breaks = seq(19000, 27000, 2e3)
+                     )
+
+hm_h <- 
+  hm_h_raw +
+    theme(
+      axis.title.y = ggtext::element_textbox_simple(
+          fill = "gray80",
+          color = "black",
+          box.color = "black",
+          size = 14 - 4,
+          linetype = 1,
+          linewidth = 0.75,
+          padding = margin(4,4,4,4),
+          margin = margin(b = 5, t = 5),
+          orientation = "left-rotated",
+          halign = 0.5,
+          valign = 0.5,
+          lineheight = 1,
+          width = unit(4, "cm"))
+    )
+
+ph <- ph_raw
+
+wgtt <- wgtt_raw
+wgtt$layers[[2]]$aes_params$size <- 1
+
+slbtt <- slbtt_raw
+slbtt$layers[[2]]$aes_params$size <- 1
+
+# for supplementary
+sup_hm_h <- 
+  sup_hm_h_raw +
+    theme(
+      axis.title.y = ggtext::element_textbox_simple(
+          fill = "gray80",
+          color = "black",
+          box.color = "black",
+          size = 14 - 4,
+          linetype = 1,
+          linewidth = 0.75,
+          padding = margin(4,4,4,4),
+          margin = margin(b = 5, t = 5),
+          orientation = "left-rotated",
+          halign = 0.5,
+          valign = 0.5,
+          lineheight = 1,
+          width = unit(4, "cm"))
+    )
+sup_wgtt_ch4 <- sup_wgtt_ch4_raw
+```
+
+
+# Combine plots
+
+## Main figure: vertical layout
+```{r}
+panel_1_v <- ph + wgtt + slbtt +
+  plot_layout(widths = c(6, 3, 3)) +
+  plot_annotation(tag_levels = "A")
+
+panel_2_v <- hm_h + plot_annotation(tag_levels = list(c("D")))
+
+panel_3_v <- load + energy + load_energy + 
+  plot_layout(widths = c(3, 3, 6)) +
+  plot_annotation(tag_levels = list(c("E", "F", "G")))
+```
+
+## Supplementary figure
+```{r}
+sup_panel_1 <- sup_wgtt_ch4 + plot_annotation(tag_levels = "A")
+sup_panel_2 <- sup_hm_h + plot_annotation(tag_levels = list(c("B")))
+```
+
+
+# Save results
+```{r}
+format <- "png" # png # pdf
+
+# main figure ---------
+panel_1_v
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_2_panel_1_vertical.{format}"),
+       bg = "white",
+       width = 10,
+       height = 4,
+       dpi = 300)
+
+panel_2_v
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_2_panel_2_vertical.{format}"),
+       bg = "white",
+       width = 10,
+       height = 4.4,
+       dpi = 300)
+
+panel_3_v
+ggsave(glue("{fig_dir}/{params$markdown_id}_Figure_2_panel_3_vertical.{format}"),
+       bg = "white",
+       width = 10,
+       height = 4,
+       dpi = 300)
+
+# supplementary ----------------------
+
+sup_panel_1
+ggsave(glue("{fig_dir}/{params$markdown_id}_Supplementary_Figure_4_panel_1.{format}"),
+       bg = "white",
+       width = 4,
+       height = 4,
+       dpi = 300)
+
+sup_panel_2
+ggsave(glue("{fig_dir}/{params$markdown_id}_Supplementary_Figure_4_panel_2.{format}"),
+       bg = "white",
+       width = 10,
+       height = 4,
+       dpi = 300)
+```
+
+
+# Finalise
+```{r}
+sessionInfo()
+```
+
